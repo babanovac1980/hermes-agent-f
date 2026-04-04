@@ -24,6 +24,15 @@ from hermes_cli.plugins import (
 )
 
 
+# ── Fixtures ──────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _no_bundled_plugins(monkeypatch):
+    """Disable bundled plugin discovery so tests are isolated from the repo."""
+    monkeypatch.setattr(PluginManager, "_bundled_plugins_dir", None)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 

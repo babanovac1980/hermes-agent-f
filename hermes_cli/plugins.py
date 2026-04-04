@@ -108,6 +108,7 @@ class LoadedPlugin:
     module: Optional[types.ModuleType] = None
     tools_registered: List[str] = field(default_factory=list)
     hooks_registered: List[str] = field(default_factory=list)
+    commands_registered: List[str] = field(default_factory=list)
     enabled: bool = False
     error: Optional[str] = None
 
@@ -182,6 +183,37 @@ class PluginContext:
             cli._pending_input.put(msg)
         return True
 
+    # -- command registration ------------------------------------------------
+
+    def register_command(
+        self,
+        name: str,
+        handler: Callable,
+        description: str = "",
+        args_hint: str = "",
+        aliases: tuple[str, ...] = (),
+    ) -> None:
+        """Register a plugin-provided slash command.
+
+        The command appears in ``/help``, autocomplete, and gateway dispatch
+        alongside built-in commands.  *handler* receives a single ``str``
+        argument (everything after the command name).
+        """
+        from hermes_cli.commands import CommandDef, register_plugin_command
+
+        cmd = CommandDef(
+            name=name,
+            description=description,
+            category="Plugins",
+            args_hint=args_hint,
+            aliases=aliases,
+        )
+        register_plugin_command(cmd)
+        self._manager._plugin_commands[name] = handler
+        for alias in aliases:
+            self._manager._plugin_commands[alias] = handler
+        logger.debug("Plugin %s registered command: /%s", self.manifest.name, name)
+
     # -- hook registration --------------------------------------------------
 
     def register_hook(self, hook_name: str, callback: Callable) -> None:
@@ -209,10 +241,15 @@ class PluginContext:
 class PluginManager:
     """Central manager that discovers, loads, and invokes plugins."""
 
+    # Default path for bundled plugins shipped with the repo.  Set to None
+    # in tests to isolate from the repo's own plugins.
+    _bundled_plugins_dir: Optional[Path] = Path(__file__).resolve().parent.parent / "plugins"
+
     def __init__(self) -> None:
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
+        self._plugin_commands: Dict[str, Callable] = {}
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
 
@@ -238,7 +275,12 @@ class PluginManager:
             project_dir = Path.cwd() / ".hermes" / "plugins"
             manifests.extend(self._scan_directory(project_dir, source="project"))
 
-        # 3. Pip / entry-point plugins
+        # 3. Bundled plugins (repo plugins/ dir, excluding memory/)
+        bundled_dir = self._bundled_plugins_dir
+        if bundled_dir and bundled_dir.is_dir():
+            manifests.extend(self._scan_directory(bundled_dir, source="bundled"))
+
+        # 4. Pip / entry-point plugins
         manifests.extend(self._scan_entry_points())
 
         # Load each manifest (skip user-disabled plugins)
@@ -339,7 +381,7 @@ class PluginManager:
         loaded = LoadedPlugin(manifest=manifest)
 
         try:
-            if manifest.source in ("user", "project"):
+            if manifest.source in ("user", "project", "bundled"):
                 module = self._load_directory_module(manifest)
             else:
                 module = self._load_entrypoint_module(manifest)
@@ -374,6 +416,14 @@ class PluginManager:
                         for h in p.hooks_registered
                     }
                 )
+                loaded.commands_registered = [
+                    c for c in self._plugin_commands
+                    if c not in {
+                        n
+                        for name, p in self._plugins.items()
+                        for n in p.commands_registered
+                    }
+                ]
                 loaded.enabled = True
 
         except Exception as exc:
@@ -477,6 +527,7 @@ class PluginManager:
                     "enabled": loaded.enabled,
                     "tools": len(loaded.tools_registered),
                     "hooks": len(loaded.hooks_registered),
+                    "commands": len(loaded.commands_registered),
                     "error": loaded.error,
                 }
             )
@@ -509,6 +560,11 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     Returns a list of non-``None`` return values from plugin callbacks.
     """
     return get_plugin_manager().invoke_hook(hook_name, **kwargs)
+
+
+def get_plugin_command_handler(name: str) -> Optional[Callable]:
+    """Return the handler for a plugin-registered slash command, or ``None``."""
+    return get_plugin_manager()._plugin_commands.get(name)
 
 
 def get_plugin_tool_names() -> Set[str]:

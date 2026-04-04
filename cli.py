@@ -3942,6 +3942,7 @@ class HermesCLI:
         print(f"(._.) Unknown cron command: {subcommand}")
         print("  Available: list, add, edit, pause, resume, run, remove")
     
+
     def _handle_skills_command(self, cmd: str):
         """Handle /skills slash command — delegates to hermes_cli.skills_hub."""
         from hermes_cli.skills_hub import handle_skills_slash
@@ -4198,9 +4199,10 @@ class HermesCLI:
                     for p in plugins:
                         status = "✓" if p["enabled"] else "✗"
                         version = f" v{p['version']}" if p["version"] else ""
-                        tools = f"{p['tools']} tools" if p["tools"] else ""
-                        hooks = f"{p['hooks']} hooks" if p["hooks"] else ""
-                        parts = [x for x in [tools, hooks] if x]
+                        tools = f"{p['tools']} tools" if p.get("tools") else ""
+                        hooks = f"{p['hooks']} hooks" if p.get("hooks") else ""
+                        cmds = f"{p['commands']} commands" if p.get("commands") else ""
+                        parts = [x for x in [tools, hooks, cmds] if x]
                         detail = f" ({', '.join(parts)})" if parts else ""
                         error = f" — {p['error']}" if p["error"] else ""
                         print(f"  {status} {p['name']}{version}{detail}{error}")

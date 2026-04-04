@@ -1,0 +1,5 @@
+name: model_switcher
+version: 1.0.0
+description: "Interactive /model command — switch models via curses menu or by name"
+provides_commands:
+  - model
