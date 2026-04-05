@@ -898,6 +898,35 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
     },
 
+    # ── Jellyfin ──
+    "JELLYFIN_URL": {
+        "description": "Jellyfin server URL (e.g. http://localhost:8096)",
+        "prompt": "Jellyfin server URL",
+        "url": "https://jellyfin.org/docs/",
+        "tools": ["jellyfin_search", "jellyfin_library_stats", "jellyfin_get_details",
+                  "jellyfin_similar", "jellyfin_recent"],
+        "password": False,
+        "category": "tool",
+    },
+    "JELLYFIN_API_KEY": {
+        "description": "Jellyfin API key for media library access",
+        "prompt": "Jellyfin API key",
+        "url": "https://jellyfin.org/docs/general/server/api-keys",
+        "tools": ["jellyfin_search", "jellyfin_library_stats", "jellyfin_get_details",
+                  "jellyfin_similar", "jellyfin_recent"],
+        "password": True,
+        "category": "tool",
+    },
+    "JELLYFIN_USER_ID": {
+        "description": "Jellyfin user ID (auto-detected if not set)",
+        "prompt": "Jellyfin user ID (leave empty to auto-detect)",
+        "url": "https://jellyfin.org/docs/",
+        "tools": ["jellyfin_search"],
+        "password": False,
+        "category": "tool",
+        "advanced": True,
+    },
+
     # ── Messaging platforms ──
     "TELEGRAM_BOT_TOKEN": {
         "description": "Telegram bot token from @BotFather",
