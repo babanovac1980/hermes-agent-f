@@ -224,10 +224,10 @@ async def _async_search(
 
 
 async def _async_library_stats() -> Dict[str, Any]:
-    """Get library statistics: counts and genre breakdown.
+    """Get library statistics matching the Jellyfin dashboard.
 
-    Jellyfin's /Genres endpoint does not return per-genre counts, so we fetch
-    all movies with their Genres field and aggregate locally.
+    Uses /Items/Counts for accurate totals (movies, series, episodes, collections),
+    then fetches all movies with Genres to produce real per-genre counts.
     """
     import aiohttp
     from collections import Counter
@@ -238,7 +238,27 @@ async def _async_library_stats() -> Dict[str, Any]:
     headers = _get_headers(token)
 
     async with aiohttp.ClientSession() as session:
-        # Get all movies with genres in one request (Fields=Genres keeps payload small)
+        # Dashboard-equivalent counts via /Items/Counts
+        async with session.get(
+            f"{jf_url}/Items/Counts",
+            headers=headers,
+            params={"UserId": user_id},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            resp.raise_for_status()
+            counts = await resp.json()
+
+        # Collections (BoxSet) count
+        async with session.get(
+            f"{jf_url}/Users/{user_id}/Items",
+            headers=headers,
+            params={"IncludeItemTypes": "BoxSet", "Recursive": "true", "Limit": "0"},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            resp.raise_for_status()
+            collections_data = await resp.json()
+
+        # All movies with Genres field for accurate per-genre counts
         async with session.get(
             f"{jf_url}/Users/{user_id}/Items",
             headers=headers,
@@ -246,24 +266,13 @@ async def _async_library_stats() -> Dict[str, Any]:
                 "IncludeItemTypes": "Movie",
                 "Recursive": "true",
                 "Fields": "Genres",
-                "Limit": "5000",
+                "Limit": "10000",
             },
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             resp.raise_for_status()
             movie_data = await resp.json()
 
-        # Get series count
-        async with session.get(
-            f"{jf_url}/Users/{user_id}/Items",
-            headers=headers,
-            params={"IncludeItemTypes": "Series", "Recursive": "true", "Limit": "0"},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            resp.raise_for_status()
-            series_data = await resp.json()
-
-    # Count genres from actual movie data
     genre_counter: Counter = Counter()
     for item in movie_data.get("Items", []):
         for g in item.get("Genres", []):
@@ -275,8 +284,11 @@ async def _async_library_stats() -> Dict[str, Any]:
     ]
 
     return {
-        "movies": movie_data.get("TotalRecordCount", len(movie_data.get("Items", []))),
-        "series": series_data.get("TotalRecordCount", 0),
+        "movies": counts.get("MovieCount", 0),
+        "series": counts.get("SeriesCount", 0),
+        "episodes": counts.get("EpisodeCount", 0),
+        "collections": collections_data.get("TotalRecordCount", 0),
+        "songs": counts.get("SongCount", 0),
         "genres": genres,
     }
 
