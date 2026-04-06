@@ -56,9 +56,13 @@ def _get_headers(api_key: str = "") -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 async def _resolve_user_id() -> str:
-    """Resolve the Jellyfin user ID, auto-detecting from the server if needed."""
+    """Resolve the Jellyfin user ID, auto-detecting from the server if needed.
+
+    Uses /Users/Me (works for any authenticated user/API key) and falls back
+    to /Users (admin only) for older server versions.
+    """
     global _cached_user_id
-    _, api_key, explicit_uid = _get_config()
+    jf_url, api_key, explicit_uid = _get_config()
     if explicit_uid:
         return explicit_uid
     if _cached_user_id:
@@ -66,17 +70,26 @@ async def _resolve_user_id() -> str:
 
     import aiohttp
 
-    jf_url, _, _ = _get_config()
     async with aiohttp.ClientSession() as session:
+        # /Users/Me works for any authenticated user or API key
         async with session.get(
-            f"{jf_url}/Users",
+            f"{jf_url}/Users/Me",
             headers=_get_headers(api_key),
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
-            resp.raise_for_status()
-            users = await resp.json()
+            if resp.status == 200:
+                data = await resp.json()
+                _cached_user_id = data["Id"]
+                return _cached_user_id
+            # Fall back to /Users for admin API keys
+            async with session.get(
+                f"{jf_url}/Users",
+                headers=_get_headers(api_key),
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp2:
+                resp2.raise_for_status()
+                users = await resp2.json()
 
-    # Prefer admin user, fall back to first user
     for u in users:
         if u.get("Policy", {}).get("IsAdministrator"):
             _cached_user_id = u["Id"]
@@ -312,6 +325,23 @@ def _run_async(coro):
         return asyncio.run(coro)
 
 
+def _jellyfin_error(e: Exception, context: str) -> str:
+    """Return a user-friendly error JSON, with specific guidance for auth failures."""
+    msg = str(e)
+    if "403" in msg or "Forbidden" in msg:
+        msg = (
+            "403 Forbidden — the API key/token was rejected. "
+            "Use a proper API key: Jellyfin Dashboard → API Keys → + button. "
+            "Browser session tokens expire and don't work as API keys."
+        )
+    elif "401" in msg or "Unauthorized" in msg:
+        msg = "401 Unauthorized — invalid or missing API key. Set JELLYFIN_API_KEY in ~/.hermes/.env"
+    elif "Cannot connect" in msg or "Connection refused" in msg:
+        msg = f"Cannot reach Jellyfin at {_get_config()[0]} — check JELLYFIN_URL"
+    logger.error("%s: %s", context, e)
+    return json.dumps({"error": msg})
+
+
 def _handle_search(args: dict, **kw) -> str:
     """Handler for jellyfin_search tool."""
     try:
@@ -326,8 +356,7 @@ def _handle_search(args: dict, **kw) -> str:
         ))
         return json.dumps({"result": result})
     except Exception as e:
-        logger.error("jellyfin_search error: %s", e)
-        return json.dumps({"error": f"Failed to search Jellyfin library: {e}"})
+        return _jellyfin_error(e, "jellyfin_search")
 
 
 def _handle_library_stats(args: dict, **kw) -> str:
@@ -336,8 +365,7 @@ def _handle_library_stats(args: dict, **kw) -> str:
         result = _run_async(_async_library_stats())
         return json.dumps({"result": result})
     except Exception as e:
-        logger.error("jellyfin_library_stats error: %s", e)
-        return json.dumps({"error": f"Failed to get library stats: {e}"})
+        return _jellyfin_error(e, "jellyfin_library_stats")
 
 
 def _handle_get_details(args: dict, **kw) -> str:
@@ -349,8 +377,7 @@ def _handle_get_details(args: dict, **kw) -> str:
         result = _run_async(_async_get_details(item_id))
         return json.dumps({"result": result})
     except Exception as e:
-        logger.error("jellyfin_get_details error: %s", e)
-        return json.dumps({"error": f"Failed to get item details: {e}"})
+        return _jellyfin_error(e, "jellyfin_get_details")
 
 
 def _handle_similar(args: dict, **kw) -> str:
@@ -365,8 +392,7 @@ def _handle_similar(args: dict, **kw) -> str:
         ))
         return json.dumps({"result": result})
     except Exception as e:
-        logger.error("jellyfin_similar error: %s", e)
-        return json.dumps({"error": f"Failed to find similar items: {e}"})
+        return _jellyfin_error(e, "jellyfin_similar")
 
 
 def _handle_recent(args: dict, **kw) -> str:
@@ -378,8 +404,7 @@ def _handle_recent(args: dict, **kw) -> str:
         ))
         return json.dumps({"result": result})
     except Exception as e:
-        logger.error("jellyfin_recent error: %s", e)
-        return json.dumps({"error": f"Failed to get recent items: {e}"})
+        return _jellyfin_error(e, "jellyfin_recent")
 
 
 # ---------------------------------------------------------------------------
