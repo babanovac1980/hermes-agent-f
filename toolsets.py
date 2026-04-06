@@ -64,7 +64,7 @@ _HERMES_CORE_TOOLS = [
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     # Jellyfin media server (gated on JELLYFIN_API_KEY via check_fn)
     "jellyfin_search", "jellyfin_library_stats", "jellyfin_get_details",
-    "jellyfin_similar", "jellyfin_recent",
+    "jellyfin_similar", "jellyfin_recent", "jellyfin_all_movies",
 ]
 
 
@@ -209,7 +209,7 @@ TOOLSETS = {
     "jellyfin": {
         "description": "Jellyfin media server: search library, get details, find similar media, view recent additions",
         "tools": ["jellyfin_search", "jellyfin_library_stats", "jellyfin_get_details",
-                  "jellyfin_similar", "jellyfin_recent"],
+                  "jellyfin_similar", "jellyfin_recent", "jellyfin_all_movies"],
         "includes": []
     },
 

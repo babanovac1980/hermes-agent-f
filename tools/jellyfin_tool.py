@@ -473,6 +473,57 @@ def _handle_recent(args: dict, **kw) -> str:
         return _jellyfin_error(e, "jellyfin_recent")
 
 
+def _handle_all_movies(args: dict, **kw) -> str:
+    """Handler for jellyfin_all_movies tool."""
+    try:
+        result = _run_async(_async_all_movies())
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_all_movies")
+
+
+async def _async_all_movies() -> Dict[str, Any]:
+    """Fetch all movies from the library with title, year, and IMDB ID.
+
+    Returns a compact list optimised for cross-referencing against external
+    lists (e.g. IMDB Top 250). IMDB IDs enable exact matching without
+    fuzzy title comparison.
+    """
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{jf_url}/Users/{user_id}/Items",
+            headers=_get_headers(token),
+            params={
+                "IncludeItemTypes": "Movie",
+                "Recursive": "true",
+                "Fields": "ProviderIds,ProductionYear",
+                "Limit": "10000",
+                "SortBy": "Name",
+                "SortOrder": "Ascending",
+            },
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+
+    movies = []
+    for item in data.get("Items", []):
+        providers = item.get("ProviderIds", {})
+        movies.append({
+            "name": item.get("Name"),
+            "year": item.get("ProductionYear"),
+            "imdb_id": providers.get("Imdb") or providers.get("imdb"),
+        })
+
+    return {"total": len(movies), "movies": movies}
+
+
 # ---------------------------------------------------------------------------
 # Availability check
 # ---------------------------------------------------------------------------
@@ -615,6 +666,22 @@ JELLYFIN_RECENT_SCHEMA = {
 }
 
 
+JELLYFIN_ALL_MOVIES_SCHEMA = {
+    "name": "jellyfin_all_movies",
+    "description": (
+        "Fetch the complete list of all movies in the Jellyfin library (title, year, "
+        "IMDB ID). Use this for cross-referencing against external lists like IMDB "
+        "Top 250 — IMDB IDs allow exact matching without fuzzy title comparison. "
+        "Do NOT use jellyfin_search for this; it is capped at 50 results."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -627,6 +694,7 @@ _JELLYFIN_TOOLS = [
     ("jellyfin_get_details", JELLYFIN_GET_DETAILS_SCHEMA, _handle_get_details),
     ("jellyfin_similar", JELLYFIN_SIMILAR_SCHEMA, _handle_similar),
     ("jellyfin_recent", JELLYFIN_RECENT_SCHEMA, _handle_recent),
+    ("jellyfin_all_movies", JELLYFIN_ALL_MOVIES_SCHEMA, _handle_all_movies),
 ]
 
 for _name, _schema, _handler in _JELLYFIN_TOOLS:
