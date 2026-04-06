@@ -224,8 +224,13 @@ async def _async_search(
 
 
 async def _async_library_stats() -> Dict[str, Any]:
-    """Get library statistics: counts and genre breakdown."""
+    """Get library statistics: counts and genre breakdown.
+
+    Jellyfin's /Genres endpoint does not return per-genre counts, so we fetch
+    all movies with their Genres field and aggregate locally.
+    """
     import aiohttp
+    from collections import Counter
 
     jf_url, _, _ = _get_config()
     token = await _get_token()
@@ -233,12 +238,17 @@ async def _async_library_stats() -> Dict[str, Any]:
     headers = _get_headers(token)
 
     async with aiohttp.ClientSession() as session:
-        # Get movie count
+        # Get all movies with genres in one request (Fields=Genres keeps payload small)
         async with session.get(
             f"{jf_url}/Users/{user_id}/Items",
             headers=headers,
-            params={"IncludeItemTypes": "Movie", "Recursive": "true", "Limit": "0"},
-            timeout=aiohttp.ClientTimeout(total=15),
+            params={
+                "IncludeItemTypes": "Movie",
+                "Recursive": "true",
+                "Fields": "Genres",
+                "Limit": "5000",
+            },
+            timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             resp.raise_for_status()
             movie_data = await resp.json()
@@ -253,26 +263,19 @@ async def _async_library_stats() -> Dict[str, Any]:
             resp.raise_for_status()
             series_data = await resp.json()
 
-        # Get genre breakdown for movies
-        async with session.get(
-            f"{jf_url}/Genres",
-            headers=headers,
-            params={"IncludeItemTypes": "Movie", "Recursive": "true"},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            resp.raise_for_status()
-            genres_data = await resp.json()
+    # Count genres from actual movie data
+    genre_counter: Counter = Counter()
+    for item in movie_data.get("Items", []):
+        for g in item.get("Genres", []):
+            genre_counter[g] += 1
 
-    genres = []
-    for g in genres_data.get("Items", []):
-        genres.append({
-            "name": g.get("Name"),
-            "count": g.get("MovieCount") or g.get("ChildCount", 0),
-        })
-    genres.sort(key=lambda x: x["count"], reverse=True)
+    genres = [
+        {"name": name, "count": count}
+        for name, count in genre_counter.most_common()
+    ]
 
     return {
-        "movies": movie_data.get("TotalRecordCount", 0),
+        "movies": movie_data.get("TotalRecordCount", len(movie_data.get("Items", []))),
         "series": series_data.get("TotalRecordCount", 0),
         "genres": genres,
     }
