@@ -7,9 +7,13 @@ Registers five LLM-callable tools:
 - ``jellyfin_similar`` -- find similar items to a given one
 - ``jellyfin_recent`` -- recently added media
 
-Authentication uses a Jellyfin API key via ``JELLYFIN_API_KEY`` env var.
+Authentication (pick one, in priority order):
+1. JELLYFIN_API_KEY  -- raw token/API key (set in ~/.hermes/.env)
+2. JELLYFIN_USER + JELLYFIN_PASSWORD -- authenticates via username/password on
+   first use and caches the access token for the process lifetime.
+
 The Jellyfin instance URL is read from ``JELLYFIN_URL`` (default: http://localhost:8096).
-User ID can be set via ``JELLYFIN_USER_ID`` or auto-detected from the server.
+User ID can be set via ``JELLYFIN_USER_ID`` or is auto-detected from the server.
 """
 
 import asyncio
@@ -28,10 +32,18 @@ _JELLYFIN_URL: str = ""
 _JELLYFIN_API_KEY: str = ""
 _JELLYFIN_USER_ID: str = ""
 _cached_user_id: str = ""
+_cached_token: str = ""   # token obtained via username/password auth
 
 _COMMON_FIELDS = (
     "Overview,Genres,CommunityRating,ProductionYear,"
     "RunTimeTicks,Studios,People,OfficialRating,Taglines"
+)
+
+# Jellyfin requires a client identifier in the Authorization header for
+# username/password auth. These values are arbitrary but must be consistent.
+_CLIENT_AUTH_HEADER = (
+    'MediaBrowser Client="HermesAgent", Device="Server", '
+    'DeviceId="hermes-agent-1", Version="1.0.0"'
 )
 
 
@@ -42,6 +54,43 @@ def _get_config():
         _JELLYFIN_API_KEY or os.getenv("JELLYFIN_API_KEY", ""),
         _JELLYFIN_USER_ID or os.getenv("JELLYFIN_USER_ID", ""),
     )
+
+
+async def _get_token() -> str:
+    """Return the active auth token, authenticating via user/password if needed."""
+    global _cached_token, _cached_user_id
+
+    _, api_key, _ = _get_config()
+    if api_key:
+        return api_key
+    if _cached_token:
+        return _cached_token
+
+    username = os.getenv("JELLYFIN_USER", "")
+    password = os.getenv("JELLYFIN_PASSWORD", "")
+    if not username:
+        raise RuntimeError(
+            "No Jellyfin credentials. Set JELLYFIN_API_KEY or "
+            "JELLYFIN_USER + JELLYFIN_PASSWORD in ~/.hermes/.env"
+        )
+
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{jf_url}/Users/AuthenticateByName",
+            headers={"Authorization": _CLIENT_AUTH_HEADER, "Content-Type": "application/json"},
+            json={"Username": username, "Pw": password},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+
+    _cached_token = data["AccessToken"]
+    _cached_user_id = data["User"]["Id"]  # also cache user ID from auth response
+    logger.debug("Jellyfin: authenticated as %s", data["User"].get("Name"))
+    return _cached_token
 
 
 def _get_headers(api_key: str = "") -> Dict[str, str]:
@@ -56,13 +105,9 @@ def _get_headers(api_key: str = "") -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 async def _resolve_user_id() -> str:
-    """Resolve the Jellyfin user ID, auto-detecting from the server if needed.
-
-    Uses /Users/Me (works for any authenticated user/API key) and falls back
-    to /Users (admin only) for older server versions.
-    """
+    """Resolve the Jellyfin user ID, auto-detecting from the server if needed."""
     global _cached_user_id
-    jf_url, api_key, explicit_uid = _get_config()
+    jf_url, _, explicit_uid = _get_config()
     if explicit_uid:
         return explicit_uid
     if _cached_user_id:
@@ -70,21 +115,22 @@ async def _resolve_user_id() -> str:
 
     import aiohttp
 
+    token = await _get_token()
     async with aiohttp.ClientSession() as session:
-        # /Users/Me works for any authenticated user or API key
+        # /Users/Me works for any authenticated user token or API key
         async with session.get(
             f"{jf_url}/Users/Me",
-            headers=_get_headers(api_key),
+            headers=_get_headers(token),
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 _cached_user_id = data["Id"]
                 return _cached_user_id
-            # Fall back to /Users for admin API keys
+            # Fall back to /Users for admin-scoped API keys
             async with session.get(
                 f"{jf_url}/Users",
-                headers=_get_headers(api_key),
+                headers=_get_headers(token),
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp2:
                 resp2.raise_for_status()
@@ -145,7 +191,8 @@ async def _async_search(
     """Search the Jellyfin media library with filters."""
     import aiohttp
 
-    jf_url, api_key, _ = _get_config()
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
     user_id = await _resolve_user_id()
     params = {
         "Recursive": "true",
@@ -165,7 +212,7 @@ async def _async_search(
     async with aiohttp.ClientSession() as session:
         async with session.get(
             f"{jf_url}/Users/{user_id}/Items",
-            headers=_get_headers(api_key),
+            headers=_get_headers(token),
             params=params,
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
@@ -180,9 +227,10 @@ async def _async_library_stats() -> Dict[str, Any]:
     """Get library statistics: counts and genre breakdown."""
     import aiohttp
 
-    jf_url, api_key, _ = _get_config()
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
     user_id = await _resolve_user_id()
-    headers = _get_headers(api_key)
+    headers = _get_headers(token)
 
     async with aiohttp.ClientSession() as session:
         # Get movie count
@@ -234,13 +282,14 @@ async def _async_get_details(item_id: str) -> Dict[str, Any]:
     """Get detailed information about a specific media item."""
     import aiohttp
 
-    jf_url, api_key, _ = _get_config()
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
     user_id = await _resolve_user_id()
 
     async with aiohttp.ClientSession() as session:
         async with session.get(
             f"{jf_url}/Users/{user_id}/Items/{item_id}",
-            headers=_get_headers(api_key),
+            headers=_get_headers(token),
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             resp.raise_for_status()
@@ -257,12 +306,13 @@ async def _async_similar(item_id: str, limit: int = 10) -> Dict[str, Any]:
     """Find items similar to a given one."""
     import aiohttp
 
-    jf_url, api_key, _ = _get_config()
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
 
     async with aiohttp.ClientSession() as session:
         async with session.get(
             f"{jf_url}/Items/{item_id}/Similar",
-            headers=_get_headers(api_key),
+            headers=_get_headers(token),
             params={
                 "Limit": str(min(max(limit, 1), 20)),
                 "Fields": _COMMON_FIELDS,
@@ -283,13 +333,14 @@ async def _async_recent(
     """Get recently added media items."""
     import aiohttp
 
-    jf_url, api_key, _ = _get_config()
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
     user_id = await _resolve_user_id()
 
     async with aiohttp.ClientSession() as session:
         async with session.get(
             f"{jf_url}/Users/{user_id}/Items/Latest",
-            headers=_get_headers(api_key),
+            headers=_get_headers(token),
             params={
                 "IncludeItemTypes": media_type,
                 "Limit": str(min(max(limit, 1), 30)),
@@ -412,8 +463,10 @@ def _handle_recent(args: dict, **kw) -> str:
 # ---------------------------------------------------------------------------
 
 def _check_jellyfin_available() -> bool:
-    """Tool is only available when JELLYFIN_API_KEY is set."""
-    return bool(os.getenv("JELLYFIN_API_KEY"))
+    """Tool is available when JELLYFIN_API_KEY or JELLYFIN_USER+PASSWORD are set."""
+    return bool(os.getenv("JELLYFIN_API_KEY")) or bool(
+        os.getenv("JELLYFIN_USER") and os.getenv("JELLYFIN_PASSWORD")
+    )
 
 
 # ---------------------------------------------------------------------------
