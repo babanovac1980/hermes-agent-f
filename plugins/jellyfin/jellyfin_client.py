@@ -683,12 +683,10 @@ JELLYFIN_ALL_MOVIES_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# Registration
+# Plugin export — consumed by plugins/media/jellyfin/__init__.py
 # ---------------------------------------------------------------------------
 
-from tools.registry import registry
-
-_JELLYFIN_TOOLS = [
+JELLYFIN_TOOLS = [
     ("jellyfin_search", JELLYFIN_SEARCH_SCHEMA, _handle_search),
     ("jellyfin_library_stats", JELLYFIN_LIBRARY_STATS_SCHEMA, _handle_library_stats),
     ("jellyfin_get_details", JELLYFIN_GET_DETAILS_SCHEMA, _handle_get_details),
@@ -697,12 +695,5 @@ _JELLYFIN_TOOLS = [
     ("jellyfin_all_movies", JELLYFIN_ALL_MOVIES_SCHEMA, _handle_all_movies),
 ]
 
-for _name, _schema, _handler in _JELLYFIN_TOOLS:
-    registry.register(
-        name=_name,
-        toolset="jellyfin",
-        schema=_schema,
-        handler=_handler,
-        check_fn=_check_jellyfin_available,
-        emoji="🎬",
-    )
+CHECK_FN = _check_jellyfin_available
+EMOJI = "🎬"

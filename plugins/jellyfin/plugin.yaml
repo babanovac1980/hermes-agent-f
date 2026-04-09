@@ -1,0 +1,13 @@
+name: jellyfin
+version: 1.0.0
+description: "Jellyfin media server integration — search, stats, recommendations, and IMDB cross-referencing for a personal library."
+author: babanovac1980
+provides_tools:
+  - jellyfin_search
+  - jellyfin_library_stats
+  - jellyfin_get_details
+  - jellyfin_similar
+  - jellyfin_recent
+  - jellyfin_all_movies
+requires_env:
+  - JELLYFIN_URL
