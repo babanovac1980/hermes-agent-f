@@ -5778,34 +5778,45 @@ class AIAgent:
     def _sanitize_tools_for_provider(self, tools: list) -> list:
         """Strip tool schema fields unsupported by the active model/provider.
 
-        Gemini's function calling spec rejects JSON Schema ``default`` fields
-        inside parameter properties with INVALID_ARGUMENT 400 errors. Many
-        Hermes built-in tools include ``default`` for documentation purposes —
-        this method removes them before the request is sent to Gemini models
-        (both direct and via OpenRouter).
+        Gemini's function calling API has two known incompatibilities with the
+        OpenAI tool schema format used by Hermes:
 
-        Returns the original list unchanged for all other providers to avoid
-        unnecessary allocation overhead.
+        1. ``default`` fields inside parameter properties → INVALID_ARGUMENT.
+        2. Numeric enum values (e.g. ``enum: [0, 1, 2]``) → schema parse
+           failure that Gemini misreports as "required[N]: property is not
+           defined", because the corrupt property map fails required validation.
+
+        Both are stripped for any model whose name contains "gemini" (covers
+        direct Gemini API and OpenRouter routing). No-op for all other
+        providers to avoid unnecessary allocation.
         """
         if "gemini" not in (self.model or "").lower():
             return tools
+
+        def _clean_prop(prop: dict) -> dict:
+            if not isinstance(prop, dict):
+                return prop
+            out = {k: v for k, v in prop.items() if k != "default"}
+            if "enum" in out and any(not isinstance(v, str) for v in out["enum"]):
+                del out["enum"]
+            return out
 
         result = []
         for tool in tools:
             fn = tool.get("function", {})
             params = fn.get("parameters", {})
             props = params.get("properties", {})
-            # Only rebuild dicts when a default field is actually present
-            if not any(
-                isinstance(v, dict) and "default" in v for v in props.values()
-            ):
+            needs_clean = any(
+                isinstance(v, dict) and (
+                    "default" in v
+                    or ("enum" in v and any(not isinstance(x, str) for x in v["enum"]))
+                )
+                for v in props.values()
+            )
+            if not needs_clean:
                 result.append(tool)
                 continue
-            new_props = {
-                k: {kk: vv for kk, vv in v.items() if kk != "default"}
-                if isinstance(v, dict) else v
-                for k, v in props.items()
-            }
+            new_props = {k: _clean_prop(v) for k, v in props.items()}
             result.append({
                 **tool,
                 "function": {**fn, "parameters": {**params, "properties": new_props}},
