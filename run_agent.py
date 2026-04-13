@@ -5508,7 +5508,7 @@ class AIAgent:
                 "promptId": str(uuid.uuid4()),
             }
         if self.tools:
-            api_kwargs["tools"] = self.tools
+            api_kwargs["tools"] = self._sanitize_tools_for_provider(self.tools)
 
         if self.max_tokens is not None:
             if not self._is_qwen_portal():
@@ -5774,6 +5774,43 @@ class AIAgent:
             msg["tool_calls"] = tool_calls
 
         return msg
+
+    def _sanitize_tools_for_provider(self, tools: list) -> list:
+        """Strip tool schema fields unsupported by the active model/provider.
+
+        Gemini's function calling spec rejects JSON Schema ``default`` fields
+        inside parameter properties with INVALID_ARGUMENT 400 errors. Many
+        Hermes built-in tools include ``default`` for documentation purposes —
+        this method removes them before the request is sent to Gemini models
+        (both direct and via OpenRouter).
+
+        Returns the original list unchanged for all other providers to avoid
+        unnecessary allocation overhead.
+        """
+        if "gemini" not in (self.model or "").lower():
+            return tools
+
+        result = []
+        for tool in tools:
+            fn = tool.get("function", {})
+            params = fn.get("parameters", {})
+            props = params.get("properties", {})
+            # Only rebuild dicts when a default field is actually present
+            if not any(
+                isinstance(v, dict) and "default" in v for v in props.values()
+            ):
+                result.append(tool)
+                continue
+            new_props = {
+                k: {kk: vv for kk, vv in v.items() if kk != "default"}
+                if isinstance(v, dict) else v
+                for k, v in props.items()
+            }
+            result.append({
+                **tool,
+                "function": {**fn, "parameters": {**params, "properties": new_props}},
+            })
+        return result
 
     @staticmethod
     def _sanitize_tool_calls_for_strict_api(api_msg: dict) -> dict:
