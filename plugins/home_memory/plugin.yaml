@@ -1,0 +1,28 @@
+name: home_memory
+version: 0.1.0
+description: "Home Memory — persistent structured knowledge of every room, device, cable, and pipe in your home. 23 tools ported from impactjo/home-memory."
+author: babanovac1980
+provides_tools:
+  - get_structure_overview
+  - find_element
+  - list_elements
+  - get_element_details
+  - get_recent_changes
+  - create_element
+  - update_element
+  - delete_element
+  - move_element
+  - get_connections
+  - get_connection_details
+  - create_connection
+  - update_connection
+  - delete_connection
+  - list_categories
+  - get_by_category
+  - create_category
+  - update_category
+  - delete_category
+  - list_statuses
+  - create_status
+  - update_status
+  - delete_status
