@@ -10,4 +10,5 @@ provides_tools:
   - jellyfin_recent
   - jellyfin_all_movies
 requires_env:
-  - JELLYFIN_URL
+  - JELLYFIN_API_KEY
+  # JELLYFIN_USER + JELLYFIN_PASSWORD is also supported (see jellyfin_client.py)

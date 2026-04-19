@@ -250,7 +250,7 @@ class UpdateConnectionParams(BaseModel):
     new_source: str | None = Field(None, description="New source element path (optional).")
     new_destination: str | None = Field(None, description="New destination element path (optional).")
     route: str | None = Field(None, description="New route description ('CLEAR' to remove).")
-    length: float | None = Field(None, description="New length in metres (0 to clear).")
+    length: float | None = Field(None, description="New length in metres.")
     purpose: str | None = Field(None, description="New purpose ('CLEAR' to remove).")
     note: str | None = Field(None, description="New note ('CLEAR' to remove).")
     description: str | None = Field(None, description="New description ('CLEAR' to remove).")

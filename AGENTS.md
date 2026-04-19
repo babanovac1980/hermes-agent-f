@@ -59,6 +59,11 @@ hermes-agent/
 ├── acp_adapter/          # ACP server (VS Code / Zed / JetBrains integration)
 ├── cron/                 # Scheduler (jobs.py, scheduler.py)
 ├── environments/         # RL training environments (Atropos)
+├── plugins/              # Bundled plugins (fork addition)
+│   ├── jellyfin/         # Jellyfin media server integration (6 tools)
+│   ├── home_memory/      # Home Memory building inventory (23 tools)
+│   ├── memory/           # Third-party memory backends (mem0, honcho, etc.)
+│   └── model_switcher/   # /model slash command plugin
 ├── tests/                # Pytest suite (~3000 tests)
 └── batch_runner.py       # Parallel batch processing
 ```
@@ -467,3 +472,173 @@ python -m pytest tests/tools/ -q                 # Tool-level tests
 ```
 
 Always run the full suite before pushing changes.
+
+---
+
+## Fork Additions: Plugin System & Custom Plugins
+
+This is a fork of Nous Research hermes-agent with a **plugin system** and two custom plugins bundled in `plugins/`.
+
+### Plugin System (`hermes_cli/plugins.py`)
+
+Plugins are discovered and loaded at startup from three sources:
+
+1. **User plugins** — `~/.hermes/plugins/<name>/`
+2. **Project plugins** — `./.hermes/plugins/<name>/` (opt-in via `HERMES_ENABLE_PROJECT_PLUGINS`)
+3. **Bundled plugins** — `plugins/<name>/` (shipped with the repo)
+4. **Pip/entry-point plugins** — packages exposing the `hermes_agent.plugins` entry-point group
+
+Each plugin directory must contain:
+- `plugin.yaml` — manifest (name, version, description, provides_tools, requires_env)
+- `__init__.py` — with a `register(ctx)` function
+
+The `PluginContext` (`ctx`) passed to `register()` supports:
+- `ctx.register_tool()` — register LLM-callable tools into the global registry
+- `ctx.register_command()` — register slash commands
+- `ctx.register_cli_command()` — register `hermes <subcommand>` CLI commands
+- `ctx.register_hook()` — register lifecycle hooks (pre_tool_call, post_llm_call, etc.)
+- `ctx.inject_message()` — inject messages into the active conversation
+
+Discovery is triggered by `discover_plugins()` in `model_tools.py:_discover_tools()` after built-in tools load. Plugin tools respect `enabled_toolsets`/`disabled_toolsets` the same as built-in tools.
+
+Plugins can be disabled via `plugins.disabled: [name]` in `config.yaml`.
+
+### Plugin Directory Layout
+
+```
+plugins/
+├── __init__.py
+├── jellyfin/           # Jellyfin media server integration (6 tools)
+├── home_memory/        # Home Memory building inventory (23 tools)
+├── memory/             # Third-party memory backends (mem0, honcho, etc.)
+└── model_switcher/     # /model slash command plugin
+```
+
+---
+
+## Jellyfin Plugin (`plugins/jellyfin/`)
+
+Integrates with a personal Jellyfin media server. 6 async tools wrapped in sync handlers.
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| `jellyfin_search` | Search by title, genre, year, media type with sorting |
+| `jellyfin_library_stats` | Library overview: movies, series, episodes, genre counts |
+| `jellyfin_get_details` | Full metadata for a specific item by ID |
+| `jellyfin_similar` | Find similar items (Jellyfin's similarity engine) |
+| `jellyfin_recent` | Recently added media |
+| `jellyfin_all_movies` | Full movie list with IMDB IDs for cross-referencing external lists |
+
+### Architecture
+
+- `plugins/jellyfin/jellyfin_client.py` — all async API logic + sync wrappers + tool schemas
+- `plugins/jellyfin/__init__.py` — `register(ctx)` iterating `JELLYFIN_TOOLS`
+- `plugins/jellyfin/SKILL.md` — skill strategies for the LLM (mood-based recs, IMDB cross-ref, etc.)
+- `plugins/jellyfin/plugin.yaml` — manifest
+
+### Authentication (priority order)
+
+1. `JELLYFIN_API_KEY` — raw API key (set in `~/.hermes/.env`)
+2. `JELLYFIN_USER` + `JELLYFIN_PASSWORD` — authenticates on first use, caches token
+
+### Env vars
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `JELLYFIN_URL` | `http://localhost:8096` | Jellyfin server URL |
+| `JELLYFIN_API_KEY` | — | API key (preferred auth) |
+| `JELLYFIN_USER` | — | Username for password auth |
+| `JELLYFIN_PASSWORD` | — | Password for password auth |
+| `JELLYFIN_USER_ID` | — | User ID (auto-detected if unset) |
+
+All Jellyfin env vars are registered in `OPTIONAL_ENV_VARS` in `hermes_cli/config.py`. The Jellyfin tools are listed in `_HERMES_CORE_TOOLS` in `toolsets.py`.
+
+The tools are registered under toolset `"jellyfin"`. Availability is gated by `check_fn` which requires `JELLYFIN_API_KEY` or `JELLYFIN_USER+JELLYFIN_PASSWORD`.
+
+---
+
+## Home Memory Plugin (`plugins/home_memory/`)
+
+A native Python port of [impactjo/home-memory](https://github.com/impactjo/home-memory) — a .NET MCP server for persistent structured knowledge of every room, device, cable, and pipe in a home. 23 tools backed by a local SQLite database.
+
+### What It Does
+
+Maintains a hierarchical inventory of physical items in a building:
+- **Elements** — physical items (rooms, walls, outlets, boilers, furniture, appliances) organized in a location hierarchy (building → floor → room → wall → item)
+- **Connections** — physical lines (cables, pipes, conduits, ducts) between elements
+- **Categories** — classify both elements and connections (Electrical, Plumbing, HVAC, etc.)
+- **Statuses** — track item lifecycle (Existing, Planned, Removed)
+
+### Tools (23 total)
+
+**Explore (5):**
+- `get_structure_overview` — building skeleton tree (entry point)
+- `find_element` — search by name/path, filter by status/category/area
+- `list_elements` — direct children of a parent element
+- `get_element_details` — full metadata + connections for one element
+- `get_recent_changes` — recently created/updated items
+
+**Manage Elements (4):**
+- `create_element` / `update_element` / `delete_element` / `move_element`
+
+**Connections (5):**
+- `get_connections` / `get_connection_details` / `create_connection` / `update_connection` / `delete_connection`
+
+**Categories (5):**
+- `list_categories` / `get_by_category` / `create_category` / `update_category` / `delete_category`
+
+**Status (4):**
+- `list_statuses` / `create_status` / `update_status` / `delete_status`
+
+### Architecture
+
+```
+plugins/home_memory/
+├── __init__.py          # register(ctx) — iterates TOOLS, calls ctx.register_tool()
+├── plugin.yaml          # manifest listing all 23 tool names
+├── registry.py          # TOOLS list, TOOL_MAP, JSON schemas (from Pydantic), EMOJI="🏠"
+├── models.py            # 23 Pydantic v2 input models (one per tool)
+├── tools.py             # 23 tool handler functions (sync, return str)
+├── db.py                # SQLite connection factory, schema init, WAL, seed
+├── query_helpers.py     # Recursive CTEs (etree, cat_tree), resolve helpers, uniqueness checks
+├── validate.py          # Forbidden chars regex, length limits, normalize_*, CLEAR sentinel
+└── seed/
+    ├── categories.py    # 120 categories as nested dict tree (port of C# categories.json)
+    ├── elements.py      # 15 default elements (House, floors, rooms, Garage, Outdoor)
+    └── statuses.py      # 3 default statuses: Existing(0), Planned(1), Removed(2)
+```
+
+### Database
+
+- **Default path:** `/opt/data/home-memory.db` (overridden by `HOME_MEMORY_DB_PATH` env var)
+- **Engine:** SQLite with WAL mode, foreign keys, busy_timeout=5000
+- **Schema:** 4 tables — `category`, `status`, `element`, `connection` (no FullName stored — computed via recursive CTEs)
+- **Seeding:** auto-seeds on first use if empty (120 categories, 3 statuses, 15 elements)
+- **Writes:** `BEGIN IMMEDIATE` with retry-on-busy (up to 15 retries with jitter)
+
+### Key design patterns
+
+- **Recursive CTEs** (`query_helpers.py`): `ETREE_CTE` and `CAT_TREE_CTE` compute full names, sort paths, and depths at query time
+- **Short-name vs long-name resolution**: Elements can be referenced by either their short-name path (e.g. `House/GF/Kitchen`) or long-name path (e.g. `House/Ground Floor/Kitchen`). Short-name wins on collision.
+- **CLEAR sentinel**: Pass `"CLEAR"` (case-insensitive) to clearable fields on update to set NULL
+- **Overwrite advisories**: Updating a non-empty text field (purpose, note, description, user_manual) appends an advisory showing the previous value preview
+- **Delete blocking**: Elements with children or connections, categories with children or referenced items, and statuses with assigned elements are protected from deletion
+- **Handler return format**: Plain strings matching the C# format (`✓ Element '...' created (OID: N).` or `Error: ...`). NOT wrapped in JSON.
+- **Forbidden chars**: Elements/categories: `$*[{}|\\<>?"/;:` and tab. Connections (subset): `*|<>"?` and tab.
+- **No env vars required**: `CHECK_FN = lambda: True` — the DB auto-provisions on first use
+
+### Tests
+
+```bash
+python -m pytest tests/plugins/test_home_memory.py -v   # ~35 unit tests
+```
+
+All tests use a file-based temp DB via `HOME_MEMORY_DB_PATH` override. Test coverage includes: seed idempotency, CRUD operations, forbidden chars, length limits, CLEAR sentinel, overwrite advisories, circular-move detection, delete blocking, category ambiguity, and all 23 tool handlers.
+
+---
+
+## Model Switcher Plugin (`plugins/model_switcher/`)
+
+Registers a `/model` slash command that lists available models (Anthropic direct + OpenRouter free) and switches by name. Not a tool plugin — uses `ctx.register_command()` instead of `ctx.register_tool()`.

@@ -10,9 +10,8 @@ metadata:
     related_skills: []
     homepage: https://jellyfin.org
 prerequisites:
-  env_vars: [JELLYFIN_API_KEY]
+  env_vars: [JELLYFIN_API_KEY]  # OR JELLYFIN_USER + JELLYFIN_PASSWORD
 ---
-
 # Jellyfin Media Advisor
 
 Use the Jellyfin tools to help users explore, analyze, and get recommendations from their personal media library.
@@ -24,6 +23,15 @@ Use the Jellyfin tools to help users explore, analyze, and get recommendations f
 - `jellyfin_get_details` -- Full metadata for a specific item
 - `jellyfin_similar` -- Find similar items (Jellyfin's similarity engine)
 - `jellyfin_recent` -- Recently added media
+- `jellyfin_all_movies` -- Complete movie list with IMDB IDs for cross-referencing
+
+## Authentication
+
+Set one of the following in `~/.hermes/.env`:
+1. `JELLYFIN_API_KEY` -- preferred, use Jellyfin Dashboard → API Keys
+2. `JELLYFIN_USER` + `JELLYFIN_PASSWORD` -- alternative, token is cached after first auth
+
+The `JELLYFIN_URL` defaults to `http://localhost:8096`. Set `JELLYFIN_USER_ID` to skip auto-detection.
 
 ## Strategy: Cross-Referencing External Lists
 

@@ -358,7 +358,7 @@ class TestCategories:
         result = tools["list_categories"]({})
         assert "Electrical" in result
         assert "Household" in result
-        assert "112" in result or "categories" in result.lower()
+        assert "120" in result
 
     def test_create_category(self, tools):
         result = tools["create_category"]({"name": "Heat Pump", "parent": "HVAC"})

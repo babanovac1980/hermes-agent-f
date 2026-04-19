@@ -158,7 +158,7 @@ def _discover_tools():
         "tools.send_message_tool",
         # "tools.honcho_tools",  # Removed — Honcho is now a memory provider plugin
         "tools.homeassistant_tool",
-        # Jellyfin moved to plugins/media/jellyfin/ (v0.8.0 plugin).
+        # Jellyfin moved to plugins/jellyfin/ (v0.8.0 plugin).
     ]
     import importlib
     for mod_name in _modules:

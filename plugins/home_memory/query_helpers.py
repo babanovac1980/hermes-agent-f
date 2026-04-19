@@ -9,7 +9,7 @@ from typing import Optional
 
 ETREE_CTE = """
 WITH RECURSIVE etree AS (
-    SELECT id, name, short_name, parent_id, position, sort_index,
+    SELECT id, name, short_name, parent_id, position, sort_index, category_id, status_id,
            CAST(coalesce(nullif(trim(short_name),''), name) AS TEXT) AS fullname,
            CAST(name AS TEXT) AS longname,
            CAST(printf('%010d', coalesce(sort_index, 2147483647))
@@ -17,7 +17,7 @@ WITH RECURSIVE etree AS (
            0 AS depth
     FROM element WHERE parent_id IS NULL
   UNION ALL
-    SELECT e.id, e.name, e.short_name, e.parent_id, e.position, e.sort_index,
+    SELECT e.id, e.name, e.short_name, e.parent_id, e.position, e.sort_index, e.category_id, e.status_id,
            p.fullname || '/' || coalesce(nullif(trim(e.short_name),''), e.name),
            p.longname || '/' || e.name,
            p.sortpath || '/' || printf('%010d', coalesce(e.sort_index, 2147483647))
@@ -79,10 +79,10 @@ def resolve_element_fullname(conn: sqlite3.Connection, path: str) -> str | None:
 
 
 def split_parent_and_name(fullname: str) -> tuple[str, str]:
-    """Returns (parent_path_with_trailing_slash, name). Top-level → ('', name)."""
+    """Returns (parent_path, name). Top-level → ('', name)."""
     i = fullname.rfind("/")
     if i >= 0:
-        return fullname[: i + 1], fullname[i + 1 :]
+        return fullname[:i], fullname[i + 1 :]
     return "", fullname
 
 
@@ -284,15 +284,16 @@ def collect_connection_overwrite_advisories(
     description: str | None = None,
     note: str | None = None,
     purpose: str | None = None,
+    route: str | None = None,
 ) -> list[str]:
     def is_text_update(v: str | None) -> bool:
         return v is not None and v != "CLEAR"
 
-    if not any(is_text_update(x) for x in (description, note, purpose)):
+    if not any(is_text_update(x) for x in (description, note, purpose, route)):
         return []
 
     row = conn.execute(
-        "SELECT description, note, purpose FROM connection WHERE id = ?",
+        "SELECT description, note, purpose, route FROM connection WHERE id = ?",
         (connection_id,),
     ).fetchone()
     if not row:
@@ -317,6 +318,7 @@ def collect_connection_overwrite_advisories(
     check("description",  row["description"],  description)
     check("note",         row["note"],          note)
     check("purpose",      row["purpose"],       purpose)
+    check("route",        row["route"],         route)
     return advisories
 
 

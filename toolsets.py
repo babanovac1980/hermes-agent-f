@@ -60,7 +60,7 @@ _HERMES_CORE_TOOLS = [
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
-    # Jellyfin media server (gated on JELLYFIN_API_KEY via check_fn)
+    # Jellyfin media server (gated on JELLYFIN_API_KEY or JELLYFIN_USER+JELLYFIN_PASSWORD via check_fn)
     "jellyfin_search", "jellyfin_library_stats", "jellyfin_get_details",
     "jellyfin_similar", "jellyfin_recent", "jellyfin_all_movies",
 ]

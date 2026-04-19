@@ -15,7 +15,7 @@ def register(ctx):
             schema=schema,
             handler=handler,
             check_fn=CHECK_FN,
-            requires_env=["JELLYFIN_URL"],
+            requires_env=["JELLYFIN_API_KEY"],
             is_async=False,
             emoji=EMOJI,
         )

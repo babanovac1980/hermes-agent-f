@@ -37,6 +37,10 @@ from .validate import (
 )
 
 
+def _escape_like(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _status_type_name(st: int) -> str:
     return {0: "Existing", 1: "Planned", 2: "Removed"}.get(st, "Unknown")
 
@@ -84,8 +88,8 @@ def handle_get_structure_overview(args: dict, **_) -> str:
                 "WHERE c.is_area_category = 1"
             )
             if under:
-                sql += " AND (upper(et.fullname) LIKE upper(?) OR upper(et.fullname) = upper(?))"
-                params += [under + "/%", under]
+                sql += " AND (upper(et.fullname) LIKE upper(?) ESCAPE '\\' OR upper(et.fullname) = upper(?))"
+                params += [_escape_like(under).upper() + "/%", under]
             sql += " ORDER BY et.sortpath"
             under_part = f" under '{under}'" if under else ""
             title = f"Building structure (areas{under_part}):"
@@ -97,13 +101,13 @@ def handle_get_structure_overview(args: dict, **_) -> str:
                 "SELECT et.id, et.fullname, et.name, et.short_name, et.depth, "
                 "s.name AS statusname, s.status_type "
                 "FROM etree et "
-                "LEFT JOIN element e ON e.id = et.id "
-                "LEFT JOIN status s ON s.id = e.status_id "
-                f"WHERE et.depth <= {abs_max}"
+                "LEFT JOIN status s ON s.id = et.status_id "
+                "WHERE et.depth <= ?"
             )
+            params.append(abs_max)
             if under:
-                sql += " AND (upper(et.fullname) LIKE upper(?) OR upper(et.fullname) = upper(?))"
-                params += [under + "/%", under]
+                sql += " AND (upper(et.fullname) LIKE upper(?) ESCAPE '\\' OR upper(et.fullname) = upper(?))"
+                params += [_escape_like(under).upper() + "/%", under]
             sql += " ORDER BY et.sortpath"
             depth_label = "full tree" if p.max_depth <= 0 and under else f"depth {effective_max}"
             under_part2 = f" under '{under}'" if under else ""
@@ -172,22 +176,22 @@ def handle_find_element(args: dict, **_) -> str:
         params: list = []
 
         if search_term:
-            term = f"%{search_term.upper()}%"
+            term = f"%{_escape_like(search_term.upper())}%"
             if p.search_all_fields:
                 conditions.append(
-                    "(upper(et.name) LIKE ? OR upper(et.fullname) LIKE ?"
-                    " OR upper(e.purpose) LIKE ? OR upper(e.note) LIKE ?"
-                    " OR upper(e.description) LIKE ? OR upper(e.user_manual) LIKE ?"
-                    " OR upper(e.position) LIKE ?)"
+                    "(upper(et.name) LIKE ? ESCAPE '\\' OR upper(et.fullname) LIKE ? ESCAPE '\\'"
+                    " OR upper(e.purpose) LIKE ? ESCAPE '\\' OR upper(e.note) LIKE ? ESCAPE '\\'"
+                    " OR upper(e.description) LIKE ? ESCAPE '\\' OR upper(e.user_manual) LIKE ? ESCAPE '\\'"
+                    " OR upper(e.position) LIKE ? ESCAPE '\\')"
                 )
                 params += [term] * 7
             else:
-                conditions.append("(upper(et.name) LIKE ? OR upper(et.fullname) LIKE ?)")
+                conditions.append("(upper(et.name) LIKE ? ESCAPE '\\' OR upper(et.fullname) LIKE ? ESCAPE '\\')")
                 params += [term, term]
 
         if under:
-            conditions.append("upper(et.fullname) LIKE upper(?)")
-            params.append(under + "/%")
+            conditions.append("upper(et.fullname) LIKE upper(?) ESCAPE '\\'")
+            params.append(_escape_like(under).upper() + "/%")
 
         if status:
             st_lower = status.lower()
@@ -202,8 +206,8 @@ def handle_find_element(args: dict, **_) -> str:
                 if exact > 0:
                     conditions.append("upper(s.name) = upper(?)")
                 else:
-                    conditions.append("upper(s.name) LIKE upper(?)")
-                    status = f"%{status.upper()}%"
+                    conditions.append("upper(s.name) LIKE upper(?) ESCAPE '\\'")
+                    status = f"%{_escape_like(status.upper())}%"
                 params.append(status)
 
         where = " AND ".join(conditions) if conditions else "1=1"
@@ -293,10 +297,10 @@ def handle_list_elements(args: dict, **_) -> str:
         if not parent_fullname:
             rows = conn.execute(
                 f"{ETREE_CTE} "
-                "SELECT et.fullname, et.name, et.short_name, e.position, s.name AS statusname, s.status_type "
-                "FROM etree et JOIN element e ON e.id = et.id "
-                "LEFT JOIN status s ON s.id = e.status_id "
-                "WHERE et.depth = 0 ORDER BY e.sort_index, et.name"
+                "SELECT et.fullname, et.name, et.short_name, et.position, s.name AS statusname, s.status_type "
+                "FROM etree et "
+                "LEFT JOIN status s ON s.id = et.status_id "
+                "WHERE et.depth = 0 ORDER BY et.sort_index, et.name"
             ).fetchall()
             title = "Top-level elements"
         else:
@@ -311,10 +315,11 @@ def handle_list_elements(args: dict, **_) -> str:
 
             rows = conn.execute(
                 f"{ETREE_CTE} "
-                "SELECT et.fullname, et.name, et.short_name, e.position, s.name AS statusname, s.status_type "
-                "FROM etree et JOIN element e ON e.id = et.id "
-                "LEFT JOIN status s ON s.id = e.status_id "
-                f"WHERE e.parent_id = {parent_id} ORDER BY e.sort_index, et.name"
+                "SELECT et.fullname, et.name, et.short_name, et.position, s.name AS statusname, s.status_type "
+                "FROM etree et "
+                "LEFT JOIN status s ON s.id = et.status_id "
+                "WHERE et.parent_id = ? ORDER BY et.sort_index, et.name",
+                (parent_id,),
             ).fetchall()
             title = f"Children of '{parent_fullname}'"
 
@@ -356,20 +361,22 @@ def handle_get_element_details(args: dict, **_) -> str:
         fn = resolved
 
         all_rows = conn.execute(
-            f"{ETREE_CTE} SELECT id, fullname, name, short_name, depth FROM etree"
+            f"{ETREE_CTE} "
+            "SELECT et.id, et.fullname, et.name, et.short_name, et.depth, "
+            "e.position, e.purpose, e.note, e.description, e.user_manual, "
+            "c.name AS cat_name, s.name AS status_name "
+            "FROM etree et "
+            "JOIN element e ON e.id = et.id "
+            "JOIN category c ON c.id = e.category_id "
+            "LEFT JOIN status s ON s.id = e.status_id"
         ).fetchall()
         id_to_fullname = {r["id"]: r["fullname"] for r in all_rows}
 
-        target = conn.execute(
-            f"{ETREE_CTE} SELECT et.id, et.fullname, et.name, et.short_name, "
-            "e.position, e.purpose, e.note, e.description, e.user_manual, "
-            "c.name AS cat_name, s.name AS status_name "
-            "FROM etree et JOIN element e ON e.id = et.id "
-            "JOIN category c ON c.id = e.category_id "
-            "LEFT JOIN status s ON s.id = e.status_id "
-            "WHERE upper(et.fullname) = upper(?)",
-            (fn,),
-        ).fetchone()
+        target = None
+        for r in all_rows:
+            if r["fullname"].lower() == fn.lower():
+                target = r
+                break
 
         if not target:
             return f"Error: element '{fn}' not found. Use find_element to search for the correct path."
@@ -464,30 +471,7 @@ def handle_get_recent_changes(args: dict, **_) -> str:
 
     try:
         conn = get_connection()
-        unions: list[str] = []
 
-        if inc_elements:
-            unions.append(
-                f"{ETREE_CTE.replace('WITH RECURSIVE', '').strip()} "
-                "SELECT et.fullname AS item_name, 'element' AS item_type, "
-                "e.created_at, e.updated_at, coalesce(e.updated_at, e.created_at) AS change_ts "
-                "FROM element e JOIN etree et ON et.id = e.id"
-            )
-        if inc_connections:
-            unions.append(
-                "SELECT name AS item_name, 'connection' AS item_type, "
-                "created_at, updated_at, coalesce(updated_at, created_at) AS change_ts "
-                "FROM connection"
-            )
-        if inc_categories:
-            unions.append(
-                f"{CAT_TREE_CTE.replace('WITH RECURSIVE', '').strip()} "
-                "SELECT ct.cat_fullname AS item_name, 'category' AS item_type, "
-                "c.created_at, c.updated_at, coalesce(c.updated_at, c.created_at) AS change_ts "
-                "FROM category c JOIN cat_tree ct ON ct.id = c.id"
-            )
-
-        # Build combined query — we need the CTEs at the top level
         cte_parts: list[str] = []
         if inc_elements:
             cte_parts.append(ETREE_CTE.replace("WITH RECURSIVE ", "").rstrip().rstrip(","))
@@ -555,8 +539,6 @@ def handle_create_element(args: dict, **_) -> str:
         return "Error: name contains invalid characters ($*[{}|\\<>?\"/;: or tab)."
 
     short_name = normalize_singleline((p.short_name or "").strip()) or None
-    if short_name == "":
-        short_name = None
     if short_name and INVALID_CHARS.search(short_name):
         return "Error: short_name contains invalid characters ($*[{}|\\<>?\"/;: or tab)."
 
@@ -582,43 +564,45 @@ def handle_create_element(args: dict, **_) -> str:
     if not category:
         return "Error: 'category' is required."
 
+    parent_input = (p.parent or "").strip().rstrip("/")
+
     try:
         conn = get_connection()
-        _, by_fullname = load_etree(conn)
-
-        parent_id: int | None = None
-        parent_fullname: str | None = None
-        parent_input = (p.parent or "").strip().rstrip("/")
-        if parent_input:
-            key = parent_input.lower()
-            parent_row = by_fullname.get(key)
-            if parent_row is None:
-                return f"Error: parent element '{parent_input}' not found."
-            parent_id = parent_row["id"]
-            parent_fullname = parent_row["fullname"]
-
-        cat_id, cat_err = resolve_category(conn, category)
-        if cat_err:
-            return cat_err
-        if cat_id is None:
-            return f"Error: category '{category}' not found. Call list_categories for available categories."
-
-        segment = short_name if short_name else name
-        new_fullname = f"{parent_fullname}/{segment}" if parent_fullname else segment
-        if new_fullname.lower() in by_fullname:
-            return f"Error: an element with full name '{new_fullname}' already exists."
-
-        sibling_err = check_sibling_uniqueness(conn, name, short_name, parent_id)
-        if sibling_err:
-            return sibling_err
-
-        status_id: int | None = None
-        if p.status and p.status.strip():
-            status_id = resolve_status_id(conn, p.status.strip())
-            if status_id is None:
-                return f"Error: status '{p.status.strip()}' not found. Call list_statuses for available statuses."
 
         def _do(c: sqlite3.Connection):
+            _, by_fullname = load_etree(c)
+
+            parent_id: int | None = None
+            parent_fullname: str | None = None
+            if parent_input:
+                key = parent_input.lower()
+                parent_row = by_fullname.get(key)
+                if parent_row is None:
+                    return f"Error: parent element '{parent_input}' not found."
+                parent_id = parent_row["id"]
+                parent_fullname = parent_row["fullname"]
+
+            cat_id, cat_err = resolve_category(c, category)
+            if cat_err:
+                return cat_err
+            if cat_id is None:
+                return f"Error: category '{category}' not found. Call list_categories for available categories."
+
+            segment = short_name if short_name else name
+            new_fullname = f"{parent_fullname}/{segment}" if parent_fullname else segment
+            if new_fullname.lower() in by_fullname:
+                return f"Error: an element with full name '{new_fullname}' already exists."
+
+            sibling_err = check_sibling_uniqueness(c, name, short_name, parent_id)
+            if sibling_err:
+                return sibling_err
+
+            status_id: int | None = None
+            if p.status and p.status.strip():
+                status_id = resolve_status_id(c, p.status.strip())
+                if status_id is None:
+                    return f"Error: status '{p.status.strip()}' not found. Call list_statuses for available statuses."
+
             si = next_sort_index(c, parent_id)
             now = _utcnow()
             cur = c.execute(
@@ -627,10 +611,10 @@ def handle_create_element(args: dict, **_) -> str:
                 (name, short_name, parent_id, position, si, cat_id, status_id,
                  purpose, note, description, user_manual, now),
             )
-            return cur.lastrowid
+            return f"✓ Element '{new_fullname}' created (OID: {cur.lastrowid})."
 
-        eid = execute_write(_do)
-        return f"✓ Element '{new_fullname}' created (OID: {eid})."
+        result = execute_write(_do)
+        return result
     except sqlite3.Error as ex:
         return f"Error creating element: {ex}"
 
@@ -669,7 +653,7 @@ def handle_update_element(args: dict, **_) -> str:
             return "Error: short_name contains invalid characters ($*[{}|\\<>?\"/;: or tab)."
 
     # Check all fields are None or empty (nothing to update)
-    if all(x is None for x in (new_name, p.short_name, p.category, p.status, p.purpose, p.note, p.description, p.user_manual, p.position)):
+    if all(x is None for x in (new_name, short_name, p.category, status, purpose, note, description, user_manual, position)):
         return "Error: provide at least one field to update."
 
     for err in [
@@ -714,28 +698,31 @@ def handle_update_element(args: dict, **_) -> str:
                     return f"Error: status '{status.strip()}' not found. Call list_statuses for available statuses."
                 status_id_new = sid
 
-        # Sibling uniqueness if name/short_name changes
-        if new_name is not None or (short_name is not None and short_name != "CLEAR"):
-            cur_row = conn.execute("SELECT parent_id FROM element WHERE id = ?", (eid,)).fetchone()
-            parent_id = cur_row["parent_id"] if cur_row else None
+        need_sibling_check = new_name is not None or (short_name is not None and short_name != "CLEAR")
+        if need_sibling_check:
             eff_name = new_name if new_name is not None else target_row["name"]
-            eff_sn: str | None
             if short_name == "CLEAR":
                 eff_sn = None
             elif short_name is not None:
                 eff_sn = short_name
             else:
                 eff_sn = target_row["short_name"]
-            sibling_err = check_sibling_uniqueness(conn, eff_name, eff_sn, parent_id, exclude_id=eid)
-            if sibling_err:
-                return sibling_err
 
-        advisories = collect_overwrite_advisories(
-            conn, eid, description=description, note=note,
-            purpose=purpose, user_manual=user_manual,
-        )
+        advisories: list[str] = []
 
         def _do(c: sqlite3.Connection):
+            nonlocal advisories
+            advisories = collect_overwrite_advisories(
+                c, eid, description=description, note=note,
+                purpose=purpose, user_manual=user_manual,
+            )
+            if need_sibling_check:
+                cur_row = c.execute("SELECT parent_id FROM element WHERE id = ?", (eid,)).fetchone()
+                parent_id = cur_row["parent_id"] if cur_row else None
+                sibling_err = check_sibling_uniqueness(c, eff_name, eff_sn, parent_id, exclude_id=eid)
+                if sibling_err:
+                    return sibling_err
+
             sets: list[str] = []
             vals: list = []
             now = _utcnow()
@@ -760,8 +747,11 @@ def handle_update_element(args: dict, **_) -> str:
             sets.append("updated_at = ?"); vals.append(now)
             vals.append(eid)
             c.execute(f"UPDATE element SET {', '.join(sets)} WHERE id = ?", vals)
+            return None
 
-        execute_write(_do)
+        result = execute_write(_do)
+        if result is not None:
+            return result
 
         # Recompute canonical fullname for return message
         new_row = conn.execute(
@@ -803,29 +793,30 @@ def handle_delete_element(args: dict, **_) -> str:
             return f"Error: element '{fullname}' not found."
         eid = row["id"]
 
-        child_count = conn.execute(
-            "SELECT COUNT(*) FROM element WHERE parent_id = ?", (eid,)
-        ).fetchone()[0]
-        if child_count > 0:
-            return (
-                f"Error: '{fullname}' has {child_count} child element(s). "
-                "Report this to the user and ask for explicit confirmation before removing any of them."
-            )
-
-        conn_count = conn.execute(
-            "SELECT COUNT(*) FROM connection WHERE source_id = ? OR destination_id = ?",
-            (eid, eid),
-        ).fetchone()[0]
-        if conn_count > 0:
-            return (
-                f"Error: '{fullname}' is referenced by {conn_count} connection(s). "
-                "Remove or reassign the connections first."
-            )
-
         def _do(c: sqlite3.Connection):
+            child_count = c.execute(
+                "SELECT COUNT(*) FROM element WHERE parent_id = ?", (eid,)
+            ).fetchone()[0]
+            if child_count > 0:
+                return (
+                    f"Error: '{fullname}' has {child_count} child element(s). "
+                    "Report this to the user and ask for explicit confirmation before removing any of them."
+                )
+            conn_count = c.execute(
+                "SELECT COUNT(*) FROM connection WHERE source_id = ? OR destination_id = ?",
+                (eid, eid),
+            ).fetchone()[0]
+            if conn_count > 0:
+                return (
+                    f"Error: '{fullname}' is referenced by {conn_count} connection(s). "
+                    "Remove or reassign the connections first."
+                )
             c.execute("DELETE FROM element WHERE id = ?", (eid,))
+            return None
 
-        execute_write(_do)
+        result = execute_write(_do)
+        if result is not None:
+            return result
         return f"✓ Element '{fullname}' deleted."
     except sqlite3.Error as ex:
         return f"Error deleting element: {ex}"
@@ -876,15 +867,17 @@ def handle_move_element(args: dict, **_) -> str:
         else:
             new_parent_fn = ""
 
-        sibling_err = check_sibling_uniqueness(conn, row["name"], row["short_name"], new_parent_id, exclude_id=eid)
-        if sibling_err:
-            return sibling_err
-
         def _do(c: sqlite3.Connection):
+            sibling_err = check_sibling_uniqueness(c, row["name"], row["short_name"], new_parent_id, exclude_id=eid)
+            if sibling_err:
+                return sibling_err
             c.execute("UPDATE element SET parent_id = ?, updated_at = ? WHERE id = ?",
                       (new_parent_id, _utcnow(), eid))
+            return None
 
-        execute_write(_do)
+        result = execute_write(_do)
+        if result is not None:
+            return result
 
         new_row = conn.execute(
             f"{ETREE_CTE} SELECT fullname FROM etree WHERE id = ?", (eid,)
@@ -901,23 +894,25 @@ def handle_move_element(args: dict, **_) -> str:
 def _resolve_connection(conn: sqlite3.Connection, name: str, source: str | None, destination: str | None) -> tuple[sqlite3.Row | None, str | None]:
     """Find connection row by name + optional source/destination filters."""
     _, by_fullname = load_etree(conn)
-    term = f"%{name.upper()}%"
+    term = f"%{_escape_like(name.upper())}%"
     rows = conn.execute(
         "SELECT c.id, c.name, c.source_id, c.destination_id, c.category_id, "
         "c.route, c.length, c.purpose, c.note, c.description "
-        "FROM connection c WHERE upper(c.name) LIKE ?",
+        "FROM connection c WHERE upper(c.name) LIKE ? ESCAPE '\\'",
         (term,),
     ).fetchall()
     if not rows:
         return None, f"Error: connection '{name}' not found."
     if source:
         src_row = by_fullname.get(source.strip().lower())
-        if src_row:
-            rows = [r for r in rows if r["source_id"] == src_row["id"]]
+        if src_row is None:
+            return None, f"Error: source element '{source}' not found."
+        rows = [r for r in rows if r["source_id"] == src_row["id"]]
     if destination:
         dst_row = by_fullname.get(destination.strip().lower())
-        if dst_row:
-            rows = [r for r in rows if r["destination_id"] == dst_row["id"]]
+        if dst_row is None:
+            return None, f"Error: destination element '{destination}' not found."
+        rows = [r for r in rows if r["destination_id"] == dst_row["id"]]
     if not rows:
         return None, f"Error: connection '{name}' not found with the specified source/destination."
     if len(rows) > 1:
@@ -941,10 +936,12 @@ def handle_get_connections(args: dict, **_) -> str:
 
     try:
         conn = get_connection()
-        _, elem_by_fn = load_etree(conn)
-        id_to_fn = {r["id"]: r["fullname"] for r in conn.execute(
-            f"{ETREE_CTE} SELECT id, fullname FROM etree"
-        ).fetchall()}
+
+        if under:
+            resolved = resolve_element_fullname(conn, under)
+            if resolved is None:
+                return f"Error: element '{under}' not found. Call get_structure_overview or find_element to find the correct path."
+            under = resolved
 
         cat_ids: set[int] | None = None
         if category:
@@ -960,15 +957,15 @@ def handle_get_connections(args: dict, **_) -> str:
         params: list = []
 
         if search_term:
-            term = f"%{search_term.upper()}%"
+            term = f"%{_escape_like(search_term.upper())}%"
             if p.search_all_fields:
                 conditions.append(
-                    "(upper(c.name) LIKE ? OR upper(c.route) LIKE ?"
-                    " OR upper(c.purpose) LIKE ? OR upper(c.note) LIKE ? OR upper(c.description) LIKE ?)"
+                    "(upper(c.name) LIKE ? ESCAPE '\\' OR upper(c.route) LIKE ? ESCAPE '\\'"
+                    " OR upper(c.purpose) LIKE ? ESCAPE '\\' OR upper(c.note) LIKE ? ESCAPE '\\' OR upper(c.description) LIKE ? ESCAPE '\\')"
                 )
                 params += [term] * 5
             else:
-                conditions.append("upper(c.name) LIKE ?")
+                conditions.append("upper(c.name) LIKE ? ESCAPE '\\'")
                 params.append(term)
 
         if cat_ids is not None:
@@ -976,8 +973,17 @@ def handle_get_connections(args: dict, **_) -> str:
             conditions.append(f"c.category_id IN ({placeholders})")
             params += list(cat_ids)
 
+        if under:
+            conditions.append(
+                "(c.source_id IN (SELECT id FROM etree WHERE upper(fullname) LIKE upper(?) ESCAPE '\\' OR upper(fullname) = upper(?))"
+                " OR c.destination_id IN (SELECT id FROM etree WHERE upper(fullname) LIKE upper(?) ESCAPE '\\' OR upper(fullname) = upper(?)))"
+            )
+            params += [_escape_like(under).upper() + "/%", under, _escape_like(under).upper() + "/%", under]
+
         where = " AND ".join(conditions) if conditions else "1=1"
+        cte_prefix = ETREE_CTE if under else ""
         sql = (
+            f"{cte_prefix}"
             f"SELECT c.id, c.name, c.source_id, c.destination_id, c.category_id, "
             f"c.route, c.length, cat.name AS catname{extra_sel} "
             "FROM connection c "
@@ -986,24 +992,25 @@ def handle_get_connections(args: dict, **_) -> str:
         )
         rows = conn.execute(sql, params).fetchall()
 
-        if under:
-            resolved = resolve_element_fullname(conn, under)
-            if resolved is None:
-                return f"Error: element '{under}' not found. Call get_structure_overview or find_element to find the correct path."
-            under = resolved
-            prefix = under.rstrip("/") + "/"
-            rows = [r for r in rows
-                    if id_to_fn.get(r["source_id"], "").lower().startswith(prefix.lower())
-                    or id_to_fn.get(r["destination_id"], "").lower().startswith(prefix.lower())
-                    or id_to_fn.get(r["source_id"], "").lower() == under.lower()
-                    or id_to_fn.get(r["destination_id"], "").lower() == under.lower()]
-
         truncated = len(rows) > 100
         if truncated:
             rows = rows[:100]
 
         if not rows:
             return "No connections found."
+
+        needed_ids = set()
+        for row in rows:
+            needed_ids.add(row["source_id"])
+            needed_ids.add(row["destination_id"])
+        if needed_ids:
+            placeholders = ",".join("?" * len(needed_ids))
+            id_to_fn = {r["id"]: r["fullname"] for r in conn.execute(
+                f"{ETREE_CTE} SELECT id, fullname FROM etree WHERE id IN ({placeholders})",
+                list(needed_ids)
+            ).fetchall()}
+        else:
+            id_to_fn = {}
 
         count_label = f"{len(rows)}+" if truncated else str(len(rows))
         lines = [f"Connections ({count_label}):\n"]
@@ -1122,26 +1129,28 @@ def handle_create_connection(args: dict, **_) -> str:
         if cat_id is None:
             return f"Error: category '{category}' not found. Call list_categories for available categories."
 
-        combo_err = check_connection_combo_uniqueness(conn, name, cat_id, src_id, dst_id)
-        if combo_err:
-            return combo_err
-
-        hint = connection_same_src_dst_hint(conn, src_id, dst_id, cat_id)
-
         def _do(c: sqlite3.Connection):
+            if src_id == dst_id:
+                return f"Error: source and destination are the same element ('{src_row['fullname']}'). A connection must link two different elements."
+            combo_err = check_connection_combo_uniqueness(c, name, cat_id, src_id, dst_id)
+            if combo_err:
+                return combo_err
             now = _utcnow()
-            cur = c.execute(
-                "INSERT INTO connection (name, source_id, destination_id, category_id, route, length, purpose, note, description, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (name, src_id, dst_id, cat_id, route, p.length, purpose, note, description, now),
-            )
-            return cur.lastrowid
+            try:
+                cur = c.execute(
+                    "INSERT INTO connection (name, source_id, destination_id, category_id, route, length, purpose, note, description, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (name, src_id, dst_id, cat_id, route, p.length, purpose, note, description, now),
+                )
+            except sqlite3.IntegrityError:
+                return "Error: a connection with the same name, category, source, and destination already exists."
+            hint = connection_same_src_dst_hint(c, src_id, dst_id, cat_id)
+            msg = f"✓ Connection '{name}' created (OID: {cur.lastrowid})."
+            if hint:
+                msg += hint
+            return msg
 
-        cid = execute_write(_do)
-        msg = f"✓ Connection '{name}' created (OID: {cid})."
-        if hint:
-            msg += hint
-        return msg
+        return execute_write(_do)
     except sqlite3.Error as ex:
         return f"Error creating connection: {ex}"
 
@@ -1173,6 +1182,9 @@ def handle_update_connection(args: dict, **_) -> str:
     ]:
         if err:
             return err
+
+    if all(x is None for x in (new_name, p.new_source, p.new_destination, p.category, p.length, route, purpose, note, description)):
+        return "Error: no fields to update. Provide at least one field to change."
 
     try:
         conn = get_connection()
@@ -1211,9 +1223,11 @@ def handle_update_connection(args: dict, **_) -> str:
         if combo_err:
             return combo_err
 
-        advisories = collect_connection_overwrite_advisories(conn, cid, description=description, note=note, purpose=purpose)
+        advisories: list[str] = []
 
         def _do(c: sqlite3.Connection):
+            nonlocal advisories
+            advisories = collect_connection_overwrite_advisories(c, cid, description=description, note=note, purpose=purpose, route=route)
             sets: list[str] = []
             vals: list = []
             if new_name:
@@ -1227,7 +1241,7 @@ def handle_update_connection(args: dict, **_) -> str:
             if route is not None:
                 sets.append("route = ?"); vals.append(None if route == "CLEAR" else route)
             if p.length is not None:
-                sets.append("length = ?"); vals.append(None if p.length == 0 else p.length)
+                sets.append("length = ?"); vals.append(float(p.length))
             for field, val in [("purpose", purpose), ("note", note), ("description", description)]:
                 if val is not None:
                     sets.append(f"{field} = ?"); vals.append(None if val == "CLEAR" else val)
@@ -1344,8 +1358,8 @@ def handle_get_by_category(args: dict, **_) -> str:
         params: list = list(cat_ids)
         under_clause = ""
         if under:
-            under_clause = " AND (upper(et.fullname) LIKE upper(?) OR upper(et.fullname) = upper(?))"
-            params += [under + "/%", under]
+            under_clause = " AND (upper(et.fullname) LIKE upper(?) ESCAPE '\\' OR upper(et.fullname) = upper(?))"
+            params += [_escape_like(under).upper() + "/%", under]
 
         rows = conn.execute(
             f"{ETREE_CTE} "
@@ -1419,24 +1433,25 @@ def handle_create_category(args: dict, **_) -> str:
         seg = short_name if short_name else name
         new_fn = f"{parent_fullname}/{seg}" if parent_fullname else seg
 
-        exists = conn.execute(
-            f"{CAT_TREE_CTE} SELECT id FROM cat_tree WHERE upper(cat_fullname) = upper(?)",
-            (new_fn,),
-        ).fetchone()
-        if exists:
-            return f"Error: a category with full name '{new_fn}' already exists."
-
         def _do(c: sqlite3.Connection):
+            exists = c.execute(
+                f"{CAT_TREE_CTE} SELECT id FROM cat_tree WHERE upper(cat_fullname) = upper(?)",
+                (new_fn,),
+            ).fetchone()
+            if exists:
+                return f"Error: a category with full name '{new_fn}' already exists."
             now = _utcnow()
-            cur = c.execute(
-                "INSERT INTO category (name, short_name, is_area_category, parent_id, description, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (name, short_name, 1 if is_area else 0, parent_id, description, now),
-            )
-            return cur.lastrowid
+            try:
+                cur = c.execute(
+                    "INSERT INTO category (name, short_name, is_area_category, parent_id, description, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (name, short_name, 1 if is_area else 0, parent_id, description, now),
+                )
+            except sqlite3.IntegrityError:
+                return f"Error: a category with full name '{new_fn}' already exists."
+            return f"✓ Category '{new_fn}' created (OID: {cur.lastrowid})."
 
-        cid = execute_write(_do)
-        return f"✓ Category '{new_fn}' created (OID: {cid})."
+        return execute_write(_do)
     except sqlite3.Error as ex:
         return f"Error creating category: {ex}"
 
@@ -1492,6 +1507,21 @@ def handle_update_category(args: dict, **_) -> str:
                     return f"Error: new parent category '{np}' not found."
                 new_parent_id = pid
 
+                current_cat_row = conn.execute(
+                    f"{CAT_TREE_CTE} SELECT cat_fullname FROM cat_tree WHERE id = ?", (cat_id,)
+                ).fetchone()
+                new_parent_row = conn.execute(
+                    f"{CAT_TREE_CTE} SELECT cat_fullname FROM cat_tree WHERE id = ?", (pid,)
+                ).fetchone()
+                if current_cat_row and new_parent_row:
+                    current_fn = current_cat_row["cat_fullname"]
+                    new_parent_fn = new_parent_row["cat_fullname"]
+                    if new_parent_fn.lower() == current_fn.lower():
+                        return "Error: cannot set a category as its own parent."
+                    prefix = current_fn.rstrip("/") + "/"
+                    if new_parent_fn.lower().startswith(prefix.lower()):
+                        return f"Error: cannot move category '{current_fn}' into its own descendant '{new_parent_fn}'."
+
         if all(x is None for x in (new_name, p.new_short_name, p.description, p.is_structural_area)) and new_parent_id == "__unchanged__":
             return "Error: provide at least one field to update."
 
@@ -1543,32 +1573,34 @@ def handle_delete_category(args: dict, **_) -> str:
         if cat_id is None:
             return f"Error: category '{category}' not found. Call list_categories for available categories."
 
-        child_count = conn.execute(
-            "SELECT COUNT(*) FROM category WHERE parent_id = ?", (cat_id,)
-        ).fetchone()[0]
-        if child_count > 0:
-            return (
-                f"Error: category '{category}' has {child_count} child categor{'y' if child_count == 1 else 'ies'}. "
-                "Report this to the user and ask for explicit confirmation before removing any of them."
-            )
-
-        elem_count = conn.execute(
-            "SELECT COUNT(*) FROM element WHERE category_id = ?", (cat_id,)
-        ).fetchone()[0]
-        conn_count = conn.execute(
-            "SELECT COUNT(*) FROM connection WHERE category_id = ?", (cat_id,)
-        ).fetchone()[0]
-        total = elem_count + conn_count
-        if total > 0:
-            return (
-                f"Error: category '{category}' is used by {total} item(s) ({elem_count} element(s), {conn_count} connection(s)). "
-                "Reassign or remove them first."
-            )
-
         def _do(c: sqlite3.Connection):
-            c.execute("DELETE FROM category WHERE id = ?", (cat_id,))
+            child_count = c.execute(
+                "SELECT COUNT(*) FROM category WHERE parent_id = ?", (cat_id,)
+            ).fetchone()[0]
+            if child_count > 0:
+                return (
+                    f"Error: category '{category}' has {child_count} child categor{'y' if child_count == 1 else 'ies'}. "
+                    "Report this to the user and ask for explicit confirmation before removing any of them."
+                )
 
-        execute_write(_do)
+            elem_count = c.execute(
+                "SELECT COUNT(*) FROM element WHERE category_id = ?", (cat_id,)
+            ).fetchone()[0]
+            conn_count = c.execute(
+                "SELECT COUNT(*) FROM connection WHERE category_id = ?", (cat_id,)
+            ).fetchone()[0]
+            total = elem_count + conn_count
+            if total > 0:
+                return (
+                    f"Error: category '{category}' is used by {total} item(s) ({elem_count} element(s), {conn_count} connection(s)). "
+                    "Reassign or remove them first."
+                )
+            c.execute("DELETE FROM category WHERE id = ?", (cat_id,))
+            return None
+
+        result = execute_write(_do)
+        if result is not None:
+            return result
         return f"✓ Category '{category}' deleted."
     except sqlite3.Error as ex:
         return f"Error deleting category: {ex}"
@@ -1634,21 +1666,22 @@ def handle_create_status(args: dict, **_) -> str:
 
     try:
         conn = get_connection()
-        existing = conn.execute(
-            "SELECT COUNT(*) FROM status WHERE upper(name) = upper(?)", (name,)
-        ).fetchone()[0]
-        if existing > 0:
-            return f"Error: a status named '{name}' already exists."
-
         def _do(c: sqlite3.Connection):
-            cur = c.execute(
-                "INSERT INTO status (name, status_type, note) VALUES (?, ?, ?)",
-                (name, st_int, note),
-            )
-            return cur.lastrowid
+            existing = c.execute(
+                "SELECT COUNT(*) FROM status WHERE upper(name) = upper(?)", (name,)
+            ).fetchone()[0]
+            if existing > 0:
+                return f"Error: a status named '{name}' already exists."
+            try:
+                cur = c.execute(
+                    "INSERT INTO status (name, status_type, note) VALUES (?, ?, ?)",
+                    (name, st_int, note),
+                )
+            except sqlite3.IntegrityError:
+                return f"Error: a status named '{name}' already exists."
+            return f"✓ Status '{name}' created (type: {_status_type_name(st_int)}, OID: {cur.lastrowid})."
 
-        sid = execute_write(_do)
-        return f"✓ Status '{name}' created (type: {_status_type_name(st_int)}, OID: {sid})."
+        return execute_write(_do)
     except sqlite3.Error as ex:
         return f"Error creating status: {ex}"
 
@@ -1744,19 +1777,21 @@ def handle_delete_status(args: dict, **_) -> str:
             return f"Error: status '{name}' not found. Call list_statuses to see available statuses."
         sid = row["id"]
 
-        usage = conn.execute(
-            "SELECT COUNT(*) FROM element WHERE status_id = ?", (sid,)
-        ).fetchone()[0]
-        if usage > 0:
-            return (
-                f"Error: status '{name}' is assigned to {usage} element{'s' if usage != 1 else ''}. "
-                f"Reassign or remove their status first (call find_element with status='{name}' to locate them)."
-            )
-
         def _do(c: sqlite3.Connection):
+            usage = c.execute(
+                "SELECT COUNT(*) FROM element WHERE status_id = ?", (sid,)
+            ).fetchone()[0]
+            if usage > 0:
+                return (
+                    f"Error: status '{name}' is assigned to {usage} element{'s' if usage != 1 else ''}. "
+                    f"Reassign or remove their status first (call find_element with status='{name}' to locate them)."
+                )
             c.execute("DELETE FROM status WHERE id = ?", (sid,))
+            return None
 
-        execute_write(_do)
+        result = execute_write(_do)
+        if result is not None:
+            return result
         return f"✓ Status '{name}' deleted."
     except sqlite3.Error as ex:
         return f"Error deleting status: {ex}"

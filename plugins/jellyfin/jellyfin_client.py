@@ -1,11 +1,12 @@
 """Jellyfin media server tool for querying and exploring a personal media library.
 
-Registers five LLM-callable tools:
+Registers six LLM-callable tools:
 - ``jellyfin_search`` -- search/filter media by title, genre, year, type
 - ``jellyfin_library_stats`` -- library overview with genre breakdown
 - ``jellyfin_get_details`` -- full metadata for a specific item
 - ``jellyfin_similar`` -- find similar items to a given one
 - ``jellyfin_recent`` -- recently added media
+- ``jellyfin_all_movies`` -- complete movie list with IMDB IDs
 
 Authentication (pick one, in priority order):
 1. JELLYFIN_API_KEY  -- raw token/API key (set in ~/.hermes/.env)
@@ -17,67 +18,105 @@ User ID can be set via ``JELLYFIN_USER_ID`` or is auto-detected from the server.
 """
 
 import asyncio
+import atexit
 import json
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-_JELLYFIN_URL: str = ""
-_JELLYFIN_API_KEY: str = ""
-_JELLYFIN_USER_ID: str = ""
 _cached_user_id: str = ""
-_cached_token: str = ""   # token obtained via username/password auth
+_cached_token: str = ""
+_cache_lock = threading.Lock()
+
+_tool_loop = None
+_tool_loop_thread = None
+_tool_loop_lock = threading.Lock()
+_auth_lock = threading.Lock()
+_shared_session = None
 
 _COMMON_FIELDS = (
     "Overview,Genres,CommunityRating,ProductionYear,"
     "RunTimeTicks,Studios,People,OfficialRating,Taglines"
 )
 
-# Jellyfin requires a client identifier in the Authorization header for
-# username/password auth. These values are arbitrary but must be consistent.
 _CLIENT_AUTH_HEADER = (
     'MediaBrowser Client="HermesAgent", Device="Server", '
     'DeviceId="hermes-agent-1", Version="1.0.0"'
 )
 
 
+def _get_tool_loop():
+    global _tool_loop, _tool_loop_thread
+    if _tool_loop is None or _tool_loop.is_closed():
+        with _tool_loop_lock:
+            if _tool_loop is None or _tool_loop.is_closed():
+                _tool_loop = asyncio.new_event_loop()
+                _tool_loop_thread = threading.Thread(target=_tool_loop.run_forever, daemon=True)
+                _tool_loop_thread.start()
+    return _tool_loop
+
+
+def _invalidate_auth_cache():
+    global _cached_token, _cached_user_id
+    with _cache_lock:
+        _cached_token = ""
+        _cached_user_id = ""
+
+
+def _safe_path_segment(value: str) -> str:
+    if "/" in value or "\\" in value or ".." in value:
+        raise ValueError("Invalid ID: contains forbidden characters")
+    return value
+
+
+def _validate_jellyfin_url(url: str) -> str:
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"JELLYFIN_URL must use http:// or https://, got: {parsed.scheme}")
+    host = parsed.hostname or ""
+    if host.startswith("169.254."):
+        raise ValueError("JELLYFIN_URL must not point to cloud metadata endpoint (169.254.x.x)")
+    return url
+
+
 def _get_config():
-    """Return (jellyfin_url, api_key, user_id) from env vars at call time."""
     return (
-        (_JELLYFIN_URL or os.getenv("JELLYFIN_URL", "http://localhost:8096")).rstrip("/"),
-        _JELLYFIN_API_KEY or os.getenv("JELLYFIN_API_KEY", ""),
-        _JELLYFIN_USER_ID or os.getenv("JELLYFIN_USER_ID", ""),
+        _validate_jellyfin_url(os.getenv("JELLYFIN_URL", "http://localhost:8096").rstrip("/")),
+        os.getenv("JELLYFIN_API_KEY", ""),
+        os.getenv("JELLYFIN_USER_ID", ""),
     )
 
 
 async def _get_token() -> str:
-    """Return the active auth token, authenticating via user/password if needed."""
     global _cached_token, _cached_user_id
 
     _, api_key, _ = _get_config()
     if api_key:
         return api_key
-    if _cached_token:
-        return _cached_token
+    with _cache_lock:
+        if _cached_token:
+            return _cached_token
 
-    username = os.getenv("JELLYFIN_USER", "")
-    password = os.getenv("JELLYFIN_PASSWORD", "")
-    if not username:
-        raise RuntimeError(
-            "No Jellyfin credentials. Set JELLYFIN_API_KEY or "
-            "JELLYFIN_USER + JELLYFIN_PASSWORD in ~/.hermes/.env"
-        )
+    with _auth_lock:
+        with _cache_lock:
+            if _cached_token:
+                return _cached_token
 
-    import aiohttp
+        username = os.getenv("JELLYFIN_USER", "")
+        password = os.getenv("JELLYFIN_PASSWORD", "")
+        if not username:
+            raise RuntimeError(
+                "No Jellyfin credentials. Set JELLYFIN_API_KEY or "
+                "JELLYFIN_USER + JELLYFIN_PASSWORD in ~/.hermes/.env"
+            )
 
-    jf_url, _, _ = _get_config()
-    async with aiohttp.ClientSession() as session:
+        jf_url, _, _ = _get_config()
+        session = await _get_session()
+        import aiohttp
         async with session.post(
             f"{jf_url}/Users/AuthenticateByName",
             headers={"Authorization": _CLIENT_AUTH_HEADER, "Content-Type": "application/json"},
@@ -87,67 +126,93 @@ async def _get_token() -> str:
             resp.raise_for_status()
             data = await resp.json()
 
-    _cached_token = data["AccessToken"]
-    _cached_user_id = data["User"]["Id"]  # also cache user ID from auth response
-    logger.debug("Jellyfin: authenticated as %s", data["User"].get("Name"))
-    return _cached_token
+        with _cache_lock:
+            _cached_token = data["AccessToken"]
+            _cached_user_id = data["User"]["Id"]
+        logger.debug("Jellyfin: authenticated as %s", data["User"].get("Name"))
+        return data["AccessToken"]
 
 
-def _get_headers(api_key: str = "") -> Dict[str, str]:
-    """Return authorization headers for Jellyfin REST API."""
-    if not api_key:
+def _get_headers(api_key: str = None) -> Dict[str, str]:
+    if api_key is None:
         _, api_key, _ = _get_config()
     return {"X-MediaBrowser-Token": api_key}
 
 
-# ---------------------------------------------------------------------------
-# User ID resolution
-# ---------------------------------------------------------------------------
+async def _get_session():
+    global _shared_session
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    tool_loop = _get_tool_loop()
+    if current_loop is not tool_loop:
+        import aiohttp
+        return aiohttp.ClientSession()
+    if _shared_session is None or _shared_session.closed:
+        import aiohttp
+        _shared_session = aiohttp.ClientSession()
+    return _shared_session
+
+
+def _cleanup_session():
+    global _shared_session
+    if _shared_session is not None and not _shared_session.closed:
+        try:
+            loop = _get_tool_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(_shared_session.close(), loop).result(timeout=5)
+        except Exception:
+            pass
+
+atexit.register(_cleanup_session)
+
 
 async def _resolve_user_id() -> str:
-    """Resolve the Jellyfin user ID, auto-detecting from the server if needed."""
     global _cached_user_id
     jf_url, _, explicit_uid = _get_config()
     if explicit_uid:
         return explicit_uid
-    if _cached_user_id:
-        return _cached_user_id
+    with _cache_lock:
+        if _cached_user_id:
+            return _cached_user_id
 
     import aiohttp
 
     token = await _get_token()
-    async with aiohttp.ClientSession() as session:
-        # /Users/Me works for any authenticated user token or API key
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Users/Me",
+        headers=_get_headers(token),
+        timeout=aiohttp.ClientTimeout(total=10),
+    ) as resp:
+        if resp.status == 200:
+            data = await resp.json()
+            with _cache_lock:
+                _cached_user_id = data["Id"]
+            return _cached_user_id
         async with session.get(
-            f"{jf_url}/Users/Me",
+            f"{jf_url}/Users",
             headers=_get_headers(token),
             timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                _cached_user_id = data["Id"]
-                return _cached_user_id
-            # Fall back to /Users for admin-scoped API keys
-            async with session.get(
-                f"{jf_url}/Users",
-                headers=_get_headers(token),
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp2:
-                resp2.raise_for_status()
-                users = await resp2.json()
+        ) as resp2:
+            resp2.raise_for_status()
+            users = await resp2.json()
 
     for u in users:
         if u.get("Policy", {}).get("IsAdministrator"):
-            _cached_user_id = u["Id"]
+            with _cache_lock:
+                _cached_user_id = u["Id"]
             return _cached_user_id
     if users:
-        _cached_user_id = users[0]["Id"]
-    return _cached_user_id
+        with _cache_lock:
+            _cached_user_id = users[0]["Id"]
+        return _cached_user_id
+    raise RuntimeError(
+        "Could not resolve Jellyfin user ID. "
+        "Set JELLYFIN_USER_ID in ~/.hermes/.env"
+    )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _format_item(item: Dict[str, Any], truncate_overview: bool = True) -> Dict[str, Any]:
     """Normalize a Jellyfin item into a compact dict for LLM context."""
@@ -174,10 +239,6 @@ def _format_item(item: Dict[str, Any], truncate_overview: bool = True) -> Dict[s
         "directors": directors,
     }
 
-
-# ---------------------------------------------------------------------------
-# Async implementations
-# ---------------------------------------------------------------------------
 
 async def _async_search(
     query: Optional[str] = None,
@@ -209,15 +270,15 @@ async def _async_search(
     if years:
         params["Years"] = years
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            f"{jf_url}/Users/{user_id}/Items",
-            headers=_get_headers(token),
-            params=params,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Items",
+        headers=_get_headers(token),
+        params=params,
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
 
     items = [_format_item(i) for i in data.get("Items", [])]
     return {"total": data.get("TotalRecordCount", len(items)), "items": items}
@@ -237,41 +298,38 @@ async def _async_library_stats() -> Dict[str, Any]:
     user_id = await _resolve_user_id()
     headers = _get_headers(token)
 
-    async with aiohttp.ClientSession() as session:
-        # Dashboard-equivalent counts via /Items/Counts
-        async with session.get(
-            f"{jf_url}/Items/Counts",
-            headers=headers,
-            params={"UserId": user_id},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            resp.raise_for_status()
-            counts = await resp.json()
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Items/Counts",
+        headers=headers,
+        params={"UserId": user_id},
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        counts = await resp.json()
 
-        # Collections (BoxSet) count
-        async with session.get(
-            f"{jf_url}/Users/{user_id}/Items",
-            headers=headers,
-            params={"IncludeItemTypes": "BoxSet", "Recursive": "true", "Limit": "0"},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            resp.raise_for_status()
-            collections_data = await resp.json()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Items",
+        headers=headers,
+        params={"IncludeItemTypes": "BoxSet", "Recursive": "true", "Limit": "0"},
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        collections_data = await resp.json()
 
-        # All movies with Genres field for accurate per-genre counts
-        async with session.get(
-            f"{jf_url}/Users/{user_id}/Items",
-            headers=headers,
-            params={
-                "IncludeItemTypes": "Movie",
-                "Recursive": "true",
-                "Fields": "Genres",
-                "Limit": "10000",
-            },
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as resp:
-            resp.raise_for_status()
-            movie_data = await resp.json()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Items",
+        headers=headers,
+        params={
+            "IncludeItemTypes": "Movie",
+            "Recursive": "true",
+            "Fields": "Genres",
+            "Limit": "10000",
+        },
+        timeout=aiohttp.ClientTimeout(total=30),
+    ) as resp:
+        resp.raise_for_status()
+        movie_data = await resp.json()
 
     genre_counter: Counter = Counter()
     for item in movie_data.get("Items", []):
@@ -283,7 +341,7 @@ async def _async_library_stats() -> Dict[str, Any]:
         for name, count in genre_counter.most_common()
     ]
 
-    return {
+    result = {
         "movies": counts.get("MovieCount", 0),
         "series": counts.get("SeriesCount", 0),
         "episodes": counts.get("EpisodeCount", 0),
@@ -291,6 +349,9 @@ async def _async_library_stats() -> Dict[str, Any]:
         "songs": counts.get("SongCount", 0),
         "genres": genres,
     }
+    if len(movie_data.get("Items", [])) >= 10000:
+        result["warning"] = "Genre counts may be incomplete — library exceeds 10000-item page limit."
+    return result
 
 
 async def _async_get_details(item_id: str) -> Dict[str, Any]:
@@ -301,17 +362,16 @@ async def _async_get_details(item_id: str) -> Dict[str, Any]:
     token = await _get_token()
     user_id = await _resolve_user_id()
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            f"{jf_url}/Users/{user_id}/Items/{item_id}",
-            headers=_get_headers(token),
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Items/{_safe_path_segment(item_id)}",
+        headers=_get_headers(token),
+        timeout=aiohttp.ClientTimeout(total=10),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
 
     result = _format_item(data, truncate_overview=False)
-    # Add extra detail fields
     result["taglines"] = data.get("Taglines", [])
     result["critic_rating"] = data.get("CriticRating")
     return result
@@ -324,18 +384,18 @@ async def _async_similar(item_id: str, limit: int = 10) -> Dict[str, Any]:
     jf_url, _, _ = _get_config()
     token = await _get_token()
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            f"{jf_url}/Items/{item_id}/Similar",
-            headers=_get_headers(token),
-            params={
-                "Limit": str(min(max(limit, 1), 20)),
-                "Fields": _COMMON_FIELDS,
-            },
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Items/{_safe_path_segment(item_id)}/Similar",
+        headers=_get_headers(token),
+        params={
+            "Limit": str(min(max(limit, 1), 20)),
+            "Fields": _COMMON_FIELDS,
+        },
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
 
     items = [_format_item(i) for i in data.get("Items", [])]
     return {"items": items}
@@ -352,58 +412,65 @@ async def _async_recent(
     token = await _get_token()
     user_id = await _resolve_user_id()
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            f"{jf_url}/Users/{user_id}/Items/Latest",
-            headers=_get_headers(token),
-            params={
-                "IncludeItemTypes": media_type,
-                "Limit": str(min(max(limit, 1), 30)),
-                "Fields": _COMMON_FIELDS,
-            },
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Items/Latest",
+        headers=_get_headers(token),
+        params={
+            "IncludeItemTypes": media_type,
+            "Limit": str(min(max(limit, 1), 30)),
+            "Fields": _COMMON_FIELDS,
+        },
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
 
-    # /Latest returns a flat list, not a paged result
     items = [_format_item(i) for i in (data if isinstance(data, list) else data.get("Items", []))]
     return {"items": items}
 
 
-# ---------------------------------------------------------------------------
-# Sync wrappers (handler signature: (args, **kw) -> str)
-# ---------------------------------------------------------------------------
-
 def _run_async(coro):
-    """Run an async coroutine from a sync handler."""
+    import concurrent.futures
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
 
     if loop and loop.is_running():
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(asyncio.run, coro)
-            return future.result(timeout=30)
-    else:
-        return asyncio.run(coro)
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(lambda: asyncio.run(coro))
+        try:
+            return future.result(timeout=300)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise
+        finally:
+            pool.shutdown(wait=False)
+
+    tool_loop = _get_tool_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, tool_loop)
+    try:
+        return future.result(timeout=300)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        raise
 
 
 def _jellyfin_error(e: Exception, context: str) -> str:
-    """Return a user-friendly error JSON, with specific guidance for auth failures."""
     msg = str(e)
-    if "403" in msg or "Forbidden" in msg:
+    status = getattr(e, "status", None)
+    if status == 401:
+        _invalidate_auth_cache()
+        msg = "401 Unauthorized — invalid or missing API key. Set JELLYFIN_API_KEY in ~/.hermes/.env"
+    elif status == 403:
         msg = (
             "403 Forbidden — the API key/token was rejected. "
             "Use a proper API key: Jellyfin Dashboard → API Keys → + button. "
             "Browser session tokens expire and don't work as API keys."
         )
-    elif "401" in msg or "Unauthorized" in msg:
-        msg = "401 Unauthorized — invalid or missing API key. Set JELLYFIN_API_KEY in ~/.hermes/.env"
     elif "Cannot connect" in msg or "Connection refused" in msg:
-        msg = f"Cannot reach Jellyfin at {_get_config()[0]} — check JELLYFIN_URL"
+        msg = "Cannot reach Jellyfin server. Check JELLYFIN_URL and that the server is running."
     logger.error("%s: %s", context, e)
     return json.dumps({"error": msg})
 
@@ -495,22 +562,22 @@ async def _async_all_movies() -> Dict[str, Any]:
     token = await _get_token()
     user_id = await _resolve_user_id()
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            f"{jf_url}/Users/{user_id}/Items",
-            headers=_get_headers(token),
-            params={
-                "IncludeItemTypes": "Movie",
-                "Recursive": "true",
-                "Fields": "ProviderIds,ProductionYear",
-                "Limit": "10000",
-                "SortBy": "Name",
-                "SortOrder": "Ascending",
-            },
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Items",
+        headers=_get_headers(token),
+        params={
+            "IncludeItemTypes": "Movie",
+            "Recursive": "true",
+            "Fields": "ProviderIds,ProductionYear",
+            "Limit": "10000",
+            "SortBy": "Name",
+            "SortOrder": "Ascending",
+        },
+        timeout=aiohttp.ClientTimeout(total=30),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
 
     movies = []
     for item in data.get("Items", []):
@@ -521,12 +588,11 @@ async def _async_all_movies() -> Dict[str, Any]:
             "imdb_id": providers.get("Imdb") or providers.get("imdb"),
         })
 
-    return {"total": len(movies), "movies": movies}
+    result = {"total": len(movies), "movies": movies}
+    if len(movies) >= 10000:
+        result["warning"] = "Library may be larger than 10000 items — result is truncated."
+    return result
 
-
-# ---------------------------------------------------------------------------
-# Availability check
-# ---------------------------------------------------------------------------
 
 def _check_jellyfin_available() -> bool:
     """Tool is available when JELLYFIN_API_KEY or JELLYFIN_USER+PASSWORD are set."""
@@ -534,10 +600,6 @@ def _check_jellyfin_available() -> bool:
         os.getenv("JELLYFIN_USER") and os.getenv("JELLYFIN_PASSWORD")
     )
 
-
-# ---------------------------------------------------------------------------
-# Tool schemas
-# ---------------------------------------------------------------------------
 
 JELLYFIN_SEARCH_SCHEMA = {
     "name": "jellyfin_search",
@@ -672,7 +734,7 @@ JELLYFIN_ALL_MOVIES_SCHEMA = {
         "Fetch the complete list of all movies in the Jellyfin library (title, year, "
         "IMDB ID). Use this for cross-referencing against external lists like IMDB "
         "Top 250 — IMDB IDs allow exact matching without fuzzy title comparison. "
-        "Do NOT use jellyfin_search for this; it is capped at 50 results."
+        "Use this instead of search when you need the complete list."
     ),
     "parameters": {
         "type": "object",
@@ -681,10 +743,6 @@ JELLYFIN_ALL_MOVIES_SCHEMA = {
     },
 }
 
-
-# ---------------------------------------------------------------------------
-# Plugin export — consumed by plugins/media/jellyfin/__init__.py
-# ---------------------------------------------------------------------------
 
 JELLYFIN_TOOLS = [
     ("jellyfin_search", JELLYFIN_SEARCH_SCHEMA, _handle_search),

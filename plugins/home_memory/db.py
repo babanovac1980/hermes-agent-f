@@ -145,75 +145,73 @@ def _seed_if_empty():
     row = _conn.execute("SELECT COUNT(*) FROM category").fetchone()
     if row[0] > 0:
         return
-    from .seed.statuses   import STATUSES
-    from .seed.categories import CATEGORIES
-    from .seed.elements   import ELEMENTS
+    _conn.execute("BEGIN IMMEDIATE")
+    try:
+        from .seed.statuses   import STATUSES
+        from .seed.categories import CATEGORIES
+        from .seed.elements   import ELEMENTS
 
-    now = _utcnow()
+        now = _utcnow()
 
-    # Insert statuses
-    for name, stype in STATUSES:
-        _conn.execute(
-            "INSERT INTO status (name, status_type) VALUES (?, ?)",
-            (name, stype),
-        )
+        for name, stype in STATUSES:
+            _conn.execute(
+                "INSERT INTO status (name, status_type) VALUES (?, ?)",
+                (name, stype),
+            )
 
-    # Insert categories recursively
-    def insert_category(cat: dict, parent_id: int | None):
-        cur = _conn.execute(
-            """INSERT INTO category (name, short_name, is_area_category, parent_id, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (cat["name"], cat.get("short_name"), 1 if cat["is_area_category"] else 0, parent_id, now),
-        )
-        new_id = cur.lastrowid
-        for child in cat.get("children", []):
-            insert_category(child, new_id)
+        def insert_category(cat: dict, parent_id: int | None):
+            cur = _conn.execute(
+                """INSERT INTO category (name, short_name, is_area_category, parent_id, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (cat["name"], cat.get("short_name"), 1 if cat["is_area_category"] else 0, parent_id, now),
+            )
+            new_id = cur.lastrowid
+            for child in cat.get("children", []):
+                insert_category(child, new_id)
 
-    for cat in CATEGORIES:
-        insert_category(cat, None)
+        for cat in CATEGORIES:
+            insert_category(cat, None)
 
-    # Build fullname → category_id map for element seed
-    cat_by_name: dict[str, int] = {}
-    for row in _conn.execute("SELECT id, name FROM category"):
-        cat_by_name[row["name"].lower()] = row["id"]
+        cat_by_name: dict[str, int] = {}
+        for row in _conn.execute("SELECT id, name FROM category"):
+            cat_by_name[row["name"].lower()] = row["id"]
 
-    # Build a fullname→id map as we insert elements (elements.json uses long-name paths)
-    fullname_to_id: dict[str, int] = {}
+        fullname_to_id: dict[str, int] = {}
 
-    for elem in ELEMENTS:
-        parent_path = elem["parent"]
-        parent_id: int | None = None
-        if parent_path:
-            parent_id = fullname_to_id.get(parent_path)
-            if parent_id is None:
-                raise ValueError(f"Seed: parent '{parent_path}' not found for element '{elem['name']}'")
+        for elem in ELEMENTS:
+            parent_path = elem["parent"]
+            parent_id: int | None = None
+            if parent_path:
+                parent_id = fullname_to_id.get(parent_path)
+                if parent_id is None:
+                    raise ValueError(f"Seed: parent '{parent_path}' not found for element '{elem['name']}'")
 
-        cat_name = elem["category"].lower()
-        cat_id = cat_by_name.get(cat_name)
-        if cat_id is None:
-            raise ValueError(f"Seed: category '{elem['category']}' not found")
+            cat_name = elem["category"].lower()
+            cat_id = cat_by_name.get(cat_name)
+            if cat_id is None:
+                raise ValueError(f"Seed: category '{elem['category']}' not found")
 
-        cur = _conn.execute(
-            """INSERT INTO element (name, short_name, parent_id, sort_index, category_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (elem["name"], elem.get("short_name"), parent_id, elem.get("sort_index", 0), cat_id, now),
-        )
-        new_id = cur.lastrowid
+            cur = _conn.execute(
+                """INSERT INTO element (name, short_name, parent_id, sort_index, category_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (elem["name"], elem.get("short_name"), parent_id, elem.get("sort_index", 0), cat_id, now),
+            )
+            new_id = cur.lastrowid
 
-        # Record under both long-name path and short-name path
-        long_path = (parent_path + "/" + elem["name"]) if parent_path else elem["name"]
-        sn = elem.get("short_name")
-        short_seg = sn if sn else elem["name"]
-        short_path = (fullname_to_id.get("__shortpath__" + str(parent_id), "") + "/" + short_seg).lstrip("/") \
-            if parent_id else short_seg
-        # Simpler approach: just use long name for lookup during seed
-        fullname_to_id[long_path] = new_id
-        # Also register short-name path for child lookups
-        if sn:
-            short_path_key = (parent_path + "/" + sn) if parent_path else sn
-            fullname_to_id[short_path_key] = new_id
+            long_path = (parent_path + "/" + elem["name"]) if parent_path else elem["name"]
+            fullname_to_id[long_path] = new_id
+            sn = elem.get("short_name")
+            if sn:
+                short_path_key = (parent_path + "/" + sn) if parent_path else sn
+                fullname_to_id[short_path_key] = new_id
 
-    _conn.commit()
+        _conn.execute("COMMIT")
+    except BaseException:
+        try:
+            _conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
 
 
 def _utcnow() -> str:
