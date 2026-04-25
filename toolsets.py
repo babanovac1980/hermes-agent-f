@@ -67,6 +67,15 @@ _HERMES_CORE_TOOLS = [
     "jellyfin_list_collections", "jellyfin_collection_items",
     "jellyfin_list_views", "jellyfin_browse_folder",
     "jellyfin_genres", "jellyfin_studios",
+    # Home Memory building inventory (no env vars required — auto-provisions SQLite)
+    "get_structure_overview", "find_element", "list_elements",
+    "get_element_details", "get_recent_changes",
+    "create_element", "update_element", "delete_element", "move_element",
+    "get_connections", "get_connection_details", "create_connection",
+    "update_connection", "delete_connection",
+    "list_categories", "get_by_category", "create_category",
+    "update_category", "delete_category",
+    "list_statuses", "create_status", "update_status", "delete_status",
 ]
 
 
@@ -244,6 +253,21 @@ TOOLSETS = {
                   "jellyfin_list_collections", "jellyfin_collection_items",
                   "jellyfin_list_views", "jellyfin_browse_folder",
                   "jellyfin_genres", "jellyfin_studios"],
+        "includes": []
+    },
+
+    "home_memory": {
+        "description": "Home Memory: persistent structured inventory of rooms, devices, cables, pipes in a building",
+        "tools": [
+            "get_structure_overview", "find_element", "list_elements",
+            "get_element_details", "get_recent_changes",
+            "create_element", "update_element", "delete_element", "move_element",
+            "get_connections", "get_connection_details", "create_connection",
+            "update_connection", "delete_connection",
+            "list_categories", "get_by_category", "create_category",
+            "update_category", "delete_category",
+            "list_statuses", "create_status", "update_status", "delete_status",
+        ],
         "includes": []
     },
 
