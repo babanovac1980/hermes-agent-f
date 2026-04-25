@@ -26,9 +26,9 @@ def _get_module():
 
 
 class TestSchemas:
-    def test_six_tools_have_valid_schemas(self):
+    def test_all_tools_have_valid_schemas(self):
         mod = _get_module()
-        assert len(mod.JELLYFIN_TOOLS) == 6
+        assert len(mod.JELLYFIN_TOOLS) == 15
         for name, schema, handler in mod.JELLYFIN_TOOLS:
             assert schema["name"] == name
             assert "description" in schema
@@ -197,9 +197,9 @@ class TestInvalidateAuthCache:
 
 
 class TestPluginRegistration:
-    def test_six_tools_registered(self):
+    def test_fifteen_tools_registered(self):
         from plugins.jellyfin import JELLYFIN_TOOLS, CHECK_FN, EMOJI
-        assert len(JELLYFIN_TOOLS) == 6
+        assert len(JELLYFIN_TOOLS) == 15
         assert callable(CHECK_FN)
         assert EMOJI == "🎬"
 
@@ -207,7 +207,7 @@ class TestPluginRegistration:
         from plugins.jellyfin import register
         ctx = MagicMock()
         register(ctx)
-        assert ctx.register_tool.call_count == 6
+        assert ctx.register_tool.call_count == 15
         first_call = ctx.register_tool.call_args_list[0]
         assert first_call.kwargs["toolset"] == "jellyfin"
         assert first_call.kwargs["requires_env"] == ["JELLYFIN_API_KEY"]
@@ -245,3 +245,109 @@ class TestResolveUserIdNoEmptyReturn:
         with patch.object(mod, "_get_session", _mock_get_session):
             with pytest.raises(RuntimeError, match="Could not resolve"):
                 mod._run_async(mod._resolve_user_id())
+
+
+class TestNewHandlerParamValidation:
+    def _get_module(self):
+        from plugins.jellyfin import jellyfin_client as mod
+        return mod
+
+    def test_get_seasons_missing_series_id(self):
+        mod = self._get_module()
+        result = json.loads(mod._handle_get_seasons({}))
+        assert "error" in result
+        assert "series_id" in result["error"]
+
+    def test_get_seasons_empty_series_id(self):
+        mod = self._get_module()
+        result = json.loads(mod._handle_get_seasons({"series_id": ""}))
+        assert "error" in result
+
+    def test_get_episodes_missing_series_id(self):
+        mod = self._get_module()
+        result = json.loads(mod._handle_get_episodes({}))
+        assert "error" in result
+        assert "series_id" in result["error"]
+
+    def test_collection_items_missing_id(self):
+        mod = self._get_module()
+        result = json.loads(mod._handle_collection_items({}))
+        assert "error" in result
+        assert "collection_id" in result["error"]
+
+    def test_browse_folder_missing_id(self):
+        mod = self._get_module()
+        result = json.loads(mod._handle_browse_folder({}))
+        assert "error" in result
+        assert "parent_id" in result["error"]
+
+    def test_get_details_still_validates(self):
+        mod = self._get_module()
+        result = json.loads(mod._handle_get_details({}))
+        assert "error" in result
+        assert "item_id" in result["error"]
+
+
+class TestSearchSchemaNewParams:
+    def test_search_has_studio_param(self):
+        mod = self._get_module()
+        props = mod.JELLYFIN_SEARCH_SCHEMA["parameters"]["properties"]
+        assert "studio" in props
+        assert "official_rating" in props
+        assert "min_runtime_minutes" in props
+        assert "max_runtime_minutes" in props
+        assert "person" in props
+
+    def _get_module(self):
+        from plugins.jellyfin import jellyfin_client as mod
+        return mod
+
+
+class TestProviderIds:
+    def test_format_item_includes_providers(self):
+        mod = self._get_module()
+        item = {
+            "Id": "123", "Name": "Test", "Type": "Movie",
+            "ProviderIds": {"Imdb": "tt123", "Tmdb": "456", "Tvdb": "789"},
+        }
+        result = mod._format_item(item)
+        assert result["provider_ids"]["imdb"] == "tt123"
+        assert result["provider_ids"]["tmdb"] == "456"
+        assert result["provider_ids"]["tvdb"] == "789"
+
+    def test_format_item_handles_missing_providers(self):
+        mod = self._get_module()
+        item = {"Id": "123", "Name": "Test", "Type": "Movie"}
+        result = mod._format_item(item)
+        assert result["provider_ids"]["imdb"] is None
+
+    def _get_module(self):
+        from plugins.jellyfin import jellyfin_client as mod
+        return mod
+
+
+class TestNewSchemasNoCrossToolRefs:
+    def test_get_seasons_no_cross_ref(self):
+        mod = self._get_module()
+        for key in ("description",):
+            text = mod.JELLYFIN_GET_SEASONS_SCHEMA.get(key, "")
+            assert "jellyfin_" not in text.lower() or "jellyfin" not in text.lower().replace(key, "")
+
+    def test_list_views_no_cross_ref(self):
+        mod = self._get_module()
+        desc = mod.JELLYFIN_LIST_VIEWS_SCHEMA["description"]
+        assert "jellyfin_" not in desc
+
+    def test_browse_folder_no_cross_ref(self):
+        mod = self._get_module()
+        desc = mod.JELLYFIN_BROWSE_FOLDER_SCHEMA["description"]
+        assert "jellyfin_" not in desc
+
+    def test_list_collections_no_cross_ref(self):
+        mod = self._get_module()
+        desc = mod.JELLYFIN_LIST_COLLECTIONS_SCHEMA["description"]
+        assert "jellyfin_" not in desc
+
+    def _get_module(self):
+        from plugins.jellyfin import jellyfin_client as mod
+        return mod

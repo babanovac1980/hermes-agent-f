@@ -1,12 +1,22 @@
 """Jellyfin media server tool for querying and exploring a personal media library.
 
-Registers six LLM-callable tools:
-- ``jellyfin_search`` -- search/filter media by title, genre, year, type
+Registers fifteen LLM-callable tools:
+- ``jellyfin_search`` -- search/filter media by title, genre, year, type, studio,
+  content rating, runtime range, and person
 - ``jellyfin_library_stats`` -- library overview with genre breakdown
 - ``jellyfin_get_details`` -- full metadata for a specific item
 - ``jellyfin_similar`` -- find similar items to a given one
 - ``jellyfin_recent`` -- recently added media
-- ``jellyfin_all_movies`` -- complete movie list with IMDB IDs
+- ``jellyfin_all_movies`` -- complete movie list with IMDB/TMDB/TVDB IDs
+- ``jellyfin_get_seasons`` -- list seasons for a TV series
+- ``jellyfin_get_episodes`` -- list episodes for a series (optionally by season)
+- ``jellyfin_next_up`` -- next-up queue for tracked series
+- ``jellyfin_list_collections`` -- browse all collections (BoxSets)
+- ``jellyfin_collection_items`` -- items inside a specific collection
+- ``jellyfin_list_views`` -- top-level library views (Movies, TV Shows, etc.)
+- ``jellyfin_browse_folder`` -- navigate into a specific library folder
+- ``jellyfin_genres`` -- list all genres in the library
+- ``jellyfin_studios`` -- list all studios in the library
 
 Authentication (pick one, in priority order):
 1. JELLYFIN_API_KEY  -- raw token/API key (set in ~/.hermes/.env)
@@ -39,7 +49,7 @@ _shared_session = None
 
 _COMMON_FIELDS = (
     "Overview,Genres,CommunityRating,ProductionYear,"
-    "RunTimeTicks,Studios,People,OfficialRating,Taglines"
+    "RunTimeTicks,Studios,People,OfficialRating,Taglines,ProviderIds"
 )
 
 _CLIENT_AUTH_HEADER = (
@@ -224,6 +234,7 @@ def _format_item(item: Dict[str, Any], truncate_overview: bool = True) -> Dict[s
     overview = item.get("Overview", "") or ""
     if truncate_overview and len(overview) > 300:
         overview = overview[:300] + "..."
+    providers = item.get("ProviderIds", {})
     return {
         "id": item.get("Id"),
         "name": item.get("Name"),
@@ -237,6 +248,11 @@ def _format_item(item: Dict[str, Any], truncate_overview: bool = True) -> Dict[s
         "studios": [s.get("Name") for s in item.get("Studios", [])],
         "cast": cast,
         "directors": directors,
+        "provider_ids": {
+            "imdb": providers.get("Imdb") or providers.get("imdb"),
+            "tmdb": providers.get("Tmdb") or providers.get("tmdb"),
+            "tvdb": providers.get("Tvdb") or providers.get("tvdb"),
+        },
     }
 
 
@@ -248,6 +264,11 @@ async def _async_search(
     sort_by: str = "Name",
     sort_order: str = "Ascending",
     limit: int = 20,
+    studio: Optional[str] = None,
+    official_rating: Optional[str] = None,
+    min_runtime_minutes: Optional[int] = None,
+    max_runtime_minutes: Optional[int] = None,
+    person: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Search the Jellyfin media library with filters."""
     import aiohttp
@@ -269,6 +290,14 @@ async def _async_search(
         params["Genres"] = genres
     if years:
         params["Years"] = years
+    if official_rating:
+        params["OfficialRatings"] = official_rating
+    if min_runtime_minutes is not None:
+        params["MinRunTimeTicks"] = str(min_runtime_minutes * 600_000_000)
+    if max_runtime_minutes is not None:
+        params["MaxRunTimeTicks"] = str(max_runtime_minutes * 600_000_000)
+    if person:
+        params["Person"] = person
 
     session = await _get_session()
     async with session.get(
@@ -281,7 +310,16 @@ async def _async_search(
         data = await resp.json()
 
     items = [_format_item(i) for i in data.get("Items", [])]
-    return {"total": data.get("TotalRecordCount", len(items)), "items": items}
+
+    if studio:
+        studio_lower = studio.lower()
+        items = [
+            it for it in items
+            if any(studio_lower in s.lower() for s in it.get("studios", []))
+        ]
+
+    total = len(items) if studio else data.get("TotalRecordCount", len(items))
+    return {"total": total, "items": items}
 
 
 async def _async_library_stats() -> Dict[str, Any]:
@@ -485,7 +523,12 @@ def _handle_search(args: dict, **kw) -> str:
             years=args.get("years"),
             sort_by=args.get("sort_by", "Name"),
             sort_order=args.get("sort_order", "Ascending"),
-            limit=args.get("limit", 20),
+            limit=args.get("limit") or 20,
+            studio=args.get("studio"),
+            official_rating=args.get("official_rating"),
+            min_runtime_minutes=args.get("min_runtime_minutes"),
+            max_runtime_minutes=args.get("max_runtime_minutes"),
+            person=args.get("person"),
         ))
         return json.dumps({"result": result})
     except Exception as e:
@@ -521,7 +564,7 @@ def _handle_similar(args: dict, **kw) -> str:
     try:
         result = _run_async(_async_similar(
             item_id=item_id,
-            limit=args.get("limit", 10),
+            limit=args.get("limit") or 10,
         ))
         return json.dumps({"result": result})
     except Exception as e:
@@ -533,7 +576,7 @@ def _handle_recent(args: dict, **kw) -> str:
     try:
         result = _run_async(_async_recent(
             media_type=args.get("media_type", "Movie"),
-            limit=args.get("limit", 15),
+            limit=args.get("limit") or 15,
         ))
         return json.dumps({"result": result})
     except Exception as e:
@@ -586,12 +629,421 @@ async def _async_all_movies() -> Dict[str, Any]:
             "name": item.get("Name"),
             "year": item.get("ProductionYear"),
             "imdb_id": providers.get("Imdb") or providers.get("imdb"),
+            "tmdb_id": providers.get("Tmdb") or providers.get("tmdb"),
+            "tvdb_id": providers.get("Tvdb") or providers.get("tvdb"),
         })
 
     result = {"total": len(movies), "movies": movies}
     if len(movies) >= 10000:
         result["warning"] = "Library may be larger than 10000 items — result is truncated."
     return result
+
+
+def _format_season(item: Dict[str, Any]) -> Dict[str, Any]:
+    overview = item.get("Overview", "") or ""
+    if len(overview) > 300:
+        overview = overview[:300] + "..."
+    return {
+        "id": item.get("Id"),
+        "name": item.get("Name"),
+        "series_name": item.get("SeriesName"),
+        "season_number": item.get("IndexNumber"),
+        "year": item.get("ProductionYear"),
+        "overview": overview or None,
+    }
+
+
+def _format_episode(item: Dict[str, Any]) -> Dict[str, Any]:
+    ticks = item.get("RunTimeTicks")
+    runtime = round(ticks / 600_000_000) if ticks else None
+    overview = item.get("Overview", "") or ""
+    if len(overview) > 300:
+        overview = overview[:300] + "..."
+    return {
+        "id": item.get("Id"),
+        "name": item.get("Name"),
+        "series_name": item.get("SeriesName"),
+        "season_number": item.get("ParentIndexNumber"),
+        "episode_number": item.get("IndexNumber"),
+        "overview": overview or None,
+        "runtime_minutes": runtime,
+        "rating": item.get("CommunityRating"),
+    }
+
+
+async def _async_get_seasons(series_id: str) -> Dict[str, Any]:
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Shows/{_safe_path_segment(series_id)}/Seasons",
+        headers=_get_headers(token),
+        params={"UserId": user_id, "Fields": "Overview,ProductionYear"},
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    seasons = [_format_season(i) for i in data.get("Items", [])]
+    return {"series_id": series_id, "seasons": seasons}
+
+
+async def _async_get_episodes(
+    series_id: str,
+    season_id: Optional[str] = None,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    params = {
+        "UserId": user_id,
+        "Fields": _COMMON_FIELDS,
+        "Limit": str(min(max(limit, 1), 100)),
+    }
+    if season_id:
+        params["SeasonId"] = season_id
+
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Shows/{_safe_path_segment(series_id)}/Episodes",
+        headers=_get_headers(token),
+        params=params,
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    episodes = [_format_episode(i) for i in data.get("Items", [])]
+    return {
+        "series_id": series_id,
+        "total": data.get("TotalRecordCount", len(episodes)),
+        "episodes": episodes,
+    }
+
+
+async def _async_next_up(limit: int = 15) -> Dict[str, Any]:
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Shows/NextUp",
+        headers=_get_headers(token),
+        params={
+            "UserId": user_id,
+            "Limit": str(min(max(limit, 1), 30)),
+            "Fields": _COMMON_FIELDS,
+        },
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    items = [_format_item(i) for i in data.get("Items", [])]
+    return {"items": items}
+
+
+async def _async_list_collections(limit: int = 50) -> Dict[str, Any]:
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Items",
+        headers=_get_headers(token),
+        params={
+            "IncludeItemTypes": "BoxSet",
+            "Recursive": "true",
+            "Fields": "Overview,ChildCount",
+            "SortBy": "Name",
+            "SortOrder": "Ascending",
+            "Limit": str(min(max(limit, 1), 100)),
+        },
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    collections = []
+    for item in data.get("Items", []):
+        overview = (item.get("Overview") or "")[:200]
+        collections.append({
+            "id": item.get("Id"),
+            "name": item.get("Name"),
+            "child_count": item.get("ChildCount", 0),
+            "overview": overview or None,
+        })
+
+    return {
+        "total": data.get("TotalRecordCount", len(collections)),
+        "collections": collections,
+    }
+
+
+async def _async_collection_items(collection_id: str) -> Dict[str, Any]:
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Items",
+        headers=_get_headers(token),
+        params={
+            "ParentId": _safe_path_segment(collection_id),
+            "Fields": _COMMON_FIELDS,
+            "SortBy": "Name",
+            "SortOrder": "Ascending",
+            "Limit": "100",
+        },
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    items = [_format_item(i) for i in data.get("Items", [])]
+    result = {
+        "collection_id": collection_id,
+        "total": data.get("TotalRecordCount", len(items)),
+        "items": items,
+    }
+    if len(items) >= 100:
+        result["warning"] = "Collection may be larger than 100 items — result is truncated."
+    return result
+
+
+async def _async_list_views() -> Dict[str, Any]:
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Views",
+        headers=_get_headers(token),
+        timeout=aiohttp.ClientTimeout(total=10),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    views = []
+    for item in data.get("Items", []):
+        views.append({
+            "id": item.get("Id"),
+            "name": item.get("Name"),
+            "collection_type": item.get("CollectionType"),
+        })
+
+    return {"views": views}
+
+
+async def _async_browse_folder(
+    parent_id: str,
+    media_type: Optional[str] = None,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    params = {
+        "ParentId": _safe_path_segment(parent_id),
+        "Fields": _COMMON_FIELDS,
+        "SortBy": "Name",
+        "SortOrder": "Ascending",
+        "Limit": str(min(max(limit, 1), 100)),
+    }
+    if media_type:
+        params["IncludeItemTypes"] = media_type
+
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Users/{_safe_path_segment(user_id)}/Items",
+        headers=_get_headers(token),
+        params=params,
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    items = [_format_item(i) for i in data.get("Items", [])]
+    return {
+        "parent_id": parent_id,
+        "total": data.get("TotalRecordCount", len(items)),
+        "items": items,
+    }
+
+
+async def _async_genres(media_type: Optional[str] = None) -> Dict[str, Any]:
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    params = {
+        "UserId": user_id,
+        "SortBy": "SortName",
+        "SortOrder": "Ascending",
+        "Limit": "500",
+    }
+    if media_type:
+        params["IncludeItemTypes"] = media_type
+
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Genres",
+        headers=_get_headers(token),
+        params=params,
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    genres = [{"name": i.get("Name"), "id": i.get("Id")} for i in data.get("Items", [])]
+    return {"total": data.get("TotalRecordCount", len(genres)), "genres": genres}
+
+
+async def _async_studios(media_type: Optional[str] = None) -> Dict[str, Any]:
+    import aiohttp
+
+    jf_url, _, _ = _get_config()
+    token = await _get_token()
+    user_id = await _resolve_user_id()
+
+    params = {
+        "UserId": user_id,
+        "SortBy": "SortName",
+        "SortOrder": "Ascending",
+        "Limit": "500",
+    }
+    if media_type:
+        params["IncludeItemTypes"] = media_type
+
+    session = await _get_session()
+    async with session.get(
+        f"{jf_url}/Studios",
+        headers=_get_headers(token),
+        params=params,
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    studios = [{"name": i.get("Name"), "id": i.get("Id")} for i in data.get("Items", [])]
+    return {"total": data.get("TotalRecordCount", len(studios)), "studios": studios}
+
+
+def _handle_get_seasons(args: dict, **kw) -> str:
+    series_id = args.get("series_id", "")
+    if not series_id:
+        return json.dumps({"error": "Missing required parameter: series_id"})
+    try:
+        result = _run_async(_async_get_seasons(series_id))
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_get_seasons")
+
+
+def _handle_get_episodes(args: dict, **kw) -> str:
+    series_id = args.get("series_id", "")
+    if not series_id:
+        return json.dumps({"error": "Missing required parameter: series_id"})
+    try:
+        result = _run_async(_async_get_episodes(
+            series_id=series_id,
+            season_id=args.get("season_id"),
+            limit=args.get("limit") or 50,
+        ))
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_get_episodes")
+
+
+def _handle_next_up(args: dict, **kw) -> str:
+    try:
+        result = _run_async(_async_next_up(limit=args.get("limit") or 15))
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_next_up")
+
+
+def _handle_list_collections(args: dict, **kw) -> str:
+    try:
+        result = _run_async(_async_list_collections(limit=args.get("limit") or 50))
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_list_collections")
+
+
+def _handle_collection_items(args: dict, **kw) -> str:
+    collection_id = args.get("collection_id", "")
+    if not collection_id:
+        return json.dumps({"error": "Missing required parameter: collection_id"})
+    try:
+        result = _run_async(_async_collection_items(collection_id))
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_collection_items")
+
+
+def _handle_list_views(args: dict, **kw) -> str:
+    try:
+        result = _run_async(_async_list_views())
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_list_views")
+
+
+def _handle_browse_folder(args: dict, **kw) -> str:
+    parent_id = args.get("parent_id", "")
+    if not parent_id:
+        return json.dumps({"error": "Missing required parameter: parent_id"})
+    try:
+        result = _run_async(_async_browse_folder(
+            parent_id=parent_id,
+            media_type=args.get("media_type"),
+            limit=args.get("limit") or 50,
+        ))
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_browse_folder")
+
+
+def _handle_genres(args: dict, **kw) -> str:
+    try:
+        result = _run_async(_async_genres(media_type=args.get("media_type")))
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_genres")
+
+
+def _handle_studios(args: dict, **kw) -> str:
+    try:
+        result = _run_async(_async_studios(media_type=args.get("media_type")))
+        return json.dumps({"result": result})
+    except Exception as e:
+        return _jellyfin_error(e, "jellyfin_studios")
 
 
 def _check_jellyfin_available() -> bool:
@@ -605,8 +1057,9 @@ JELLYFIN_SEARCH_SCHEMA = {
     "name": "jellyfin_search",
     "description": (
         "Search the Jellyfin media library. Supports filtering by title, genre, "
-        "year, and media type (Movie, Series, Episode, Audio). Returns matching "
-        "items with title, year, rating, genres, overview, and runtime."
+        "year, media type, studio, content rating, runtime range, and person name. "
+        "Returns matching items with title, year, rating, genres, overview, runtime, "
+        "and provider IDs (IMDB, TMDB, TVDB)."
     ),
     "parameters": {
         "type": "object",
@@ -644,6 +1097,26 @@ JELLYFIN_SEARCH_SCHEMA = {
             "limit": {
                 "type": "integer",
                 "description": "Max results to return (1-50). Default: 20.",
+            },
+            "studio": {
+                "type": "string",
+                "description": "Filter by studio name (case-insensitive partial match, e.g. 'Warner').",
+            },
+            "official_rating": {
+                "type": "string",
+                "description": "Filter by content rating (e.g. 'PG', 'R', 'TV-MA').",
+            },
+            "min_runtime_minutes": {
+                "type": "integer",
+                "description": "Minimum runtime in minutes.",
+            },
+            "max_runtime_minutes": {
+                "type": "integer",
+                "description": "Maximum runtime in minutes.",
+            },
+            "person": {
+                "type": "string",
+                "description": "Filter by person name (actor, director, etc.).",
             },
         },
         "required": [],
@@ -732,13 +1205,189 @@ JELLYFIN_ALL_MOVIES_SCHEMA = {
     "name": "jellyfin_all_movies",
     "description": (
         "Fetch the complete list of all movies in the Jellyfin library (title, year, "
-        "IMDB ID). Use this for cross-referencing against external lists like IMDB "
-        "Top 250 — IMDB IDs allow exact matching without fuzzy title comparison. "
+        "IMDB/TMDB/TVDB IDs). Use this for cross-referencing against external lists like "
+        "IMDB Top 250 — provider IDs allow exact matching without fuzzy title comparison. "
         "Use this instead of search when you need the complete list."
     ),
     "parameters": {
         "type": "object",
         "properties": {},
+        "required": [],
+    },
+}
+
+JELLYFIN_GET_SEASONS_SCHEMA = {
+    "name": "jellyfin_get_seasons",
+    "description": (
+        "Get all seasons for a TV series. Returns season names, numbers, "
+        "and basic metadata with season IDs for further exploration."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "series_id": {
+                "type": "string",
+                "description": "The Jellyfin item ID of the series (from search results).",
+            },
+        },
+        "required": ["series_id"],
+    },
+}
+
+JELLYFIN_GET_EPISODES_SCHEMA = {
+    "name": "jellyfin_get_episodes",
+    "description": (
+        "Get episodes for a TV series. Optionally filter by season ID. "
+        "Returns episode titles, numbers, overviews, and runtimes."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "series_id": {
+                "type": "string",
+                "description": "The Jellyfin item ID of the series.",
+            },
+            "season_id": {
+                "type": "string",
+                "description": "Optional season ID to filter episodes to a specific season.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max episodes to return (1-100). Default: 50.",
+            },
+        },
+        "required": ["series_id"],
+    },
+}
+
+JELLYFIN_NEXT_UP_SCHEMA = {
+    "name": "jellyfin_next_up",
+    "description": (
+        "Get the Next Up queue — next episode to watch for series with recent viewing. "
+        "Note: returns empty results if the plugin user has no watch history."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Max results (1-30). Default: 15.",
+            },
+        },
+        "required": [],
+    },
+}
+
+JELLYFIN_LIST_COLLECTIONS_SCHEMA = {
+    "name": "jellyfin_list_collections",
+    "description": (
+        "List all collections (BoxSets) in the Jellyfin library. "
+        "Returns collection names and item counts."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Max collections to return (1-100). Default: 50.",
+            },
+        },
+        "required": [],
+    },
+}
+
+JELLYFIN_COLLECTION_ITEMS_SCHEMA = {
+    "name": "jellyfin_collection_items",
+    "description": (
+        "Get all items inside a Jellyfin collection. Returns full metadata "
+        "for each item including provider IDs."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "collection_id": {
+                "type": "string",
+                "description": "The Jellyfin item ID of the collection (from jellyfin_list_collections).",
+            },
+        },
+        "required": ["collection_id"],
+    },
+}
+
+JELLYFIN_LIST_VIEWS_SCHEMA = {
+    "name": "jellyfin_list_views",
+    "description": (
+        "Get top-level library views (e.g. Movies, TV Shows, Collections). "
+        "Returns view IDs for navigating into each section."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+JELLYFIN_BROWSE_FOLDER_SCHEMA = {
+    "name": "jellyfin_browse_folder",
+    "description": (
+        "Browse items inside a specific library folder. Pass a parent folder ID "
+        "to see its children. Optionally filter by media type."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "parent_id": {
+                "type": "string",
+                "description": "The Jellyfin ID of the parent folder (from list_views or a previous browse).",
+            },
+            "media_type": {
+                "type": "string",
+                "enum": ["Movie", "Series", "Episode"],
+                "description": "Optional media type filter.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max items to return (1-100). Default: 50.",
+            },
+        },
+        "required": ["parent_id"],
+    },
+}
+
+JELLYFIN_GENRES_SCHEMA = {
+    "name": "jellyfin_genres",
+    "description": (
+        "List all genres available in the Jellyfin library. Optionally filter "
+        "by media type to see genres with counts for specific content."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "media_type": {
+                "type": "string",
+                "enum": ["Movie", "Series", "Episode"],
+                "description": "Optional media type to scope genre listing.",
+            },
+        },
+        "required": [],
+    },
+}
+
+JELLYFIN_STUDIOS_SCHEMA = {
+    "name": "jellyfin_studios",
+    "description": (
+        "List all studios represented in the Jellyfin library. Optionally filter "
+        "by media type to see studios for specific content."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "media_type": {
+                "type": "string",
+                "enum": ["Movie", "Series", "Episode"],
+                "description": "Optional media type to scope studio listing.",
+            },
+        },
         "required": [],
     },
 }
@@ -751,6 +1400,15 @@ JELLYFIN_TOOLS = [
     ("jellyfin_similar", JELLYFIN_SIMILAR_SCHEMA, _handle_similar),
     ("jellyfin_recent", JELLYFIN_RECENT_SCHEMA, _handle_recent),
     ("jellyfin_all_movies", JELLYFIN_ALL_MOVIES_SCHEMA, _handle_all_movies),
+    ("jellyfin_get_seasons", JELLYFIN_GET_SEASONS_SCHEMA, _handle_get_seasons),
+    ("jellyfin_get_episodes", JELLYFIN_GET_EPISODES_SCHEMA, _handle_get_episodes),
+    ("jellyfin_next_up", JELLYFIN_NEXT_UP_SCHEMA, _handle_next_up),
+    ("jellyfin_list_collections", JELLYFIN_LIST_COLLECTIONS_SCHEMA, _handle_list_collections),
+    ("jellyfin_collection_items", JELLYFIN_COLLECTION_ITEMS_SCHEMA, _handle_collection_items),
+    ("jellyfin_list_views", JELLYFIN_LIST_VIEWS_SCHEMA, _handle_list_views),
+    ("jellyfin_browse_folder", JELLYFIN_BROWSE_FOLDER_SCHEMA, _handle_browse_folder),
+    ("jellyfin_genres", JELLYFIN_GENRES_SCHEMA, _handle_genres),
+    ("jellyfin_studios", JELLYFIN_STUDIOS_SCHEMA, _handle_studios),
 ]
 
 CHECK_FN = _check_jellyfin_available

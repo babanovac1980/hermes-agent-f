@@ -63,6 +63,10 @@ _HERMES_CORE_TOOLS = [
     # Jellyfin media server (gated on JELLYFIN_API_KEY or JELLYFIN_USER+JELLYFIN_PASSWORD via check_fn)
     "jellyfin_search", "jellyfin_library_stats", "jellyfin_get_details",
     "jellyfin_similar", "jellyfin_recent", "jellyfin_all_movies",
+    "jellyfin_get_seasons", "jellyfin_get_episodes", "jellyfin_next_up",
+    "jellyfin_list_collections", "jellyfin_collection_items",
+    "jellyfin_list_views", "jellyfin_browse_folder",
+    "jellyfin_genres", "jellyfin_studios",
 ]
 
 
@@ -233,9 +237,13 @@ TOOLSETS = {
     },
 
     "jellyfin": {
-        "description": "Jellyfin media server: search library, get details, find similar media, view recent additions",
+        "description": "Jellyfin media server: search library, series navigation, collections, library browsing, genres, studios",
         "tools": ["jellyfin_search", "jellyfin_library_stats", "jellyfin_get_details",
-                  "jellyfin_similar", "jellyfin_recent", "jellyfin_all_movies"],
+                  "jellyfin_similar", "jellyfin_recent", "jellyfin_all_movies",
+                  "jellyfin_get_seasons", "jellyfin_get_episodes", "jellyfin_next_up",
+                  "jellyfin_list_collections", "jellyfin_collection_items",
+                  "jellyfin_list_views", "jellyfin_browse_folder",
+                  "jellyfin_genres", "jellyfin_studios"],
         "includes": []
     },
 

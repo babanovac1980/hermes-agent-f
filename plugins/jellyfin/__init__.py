@@ -1,4 +1,4 @@
-"""Jellyfin plugin — registers six tools for querying a personal Jellyfin library.
+"""Jellyfin plugin — registers fifteen tools for querying a personal Jellyfin library.
 
 Tools are imported from ``jellyfin_client`` (the ported ``tools/jellyfin_tool.py``).
 All handlers are sync wrappers around aiohttp coroutines, so ``is_async=False``.

@@ -1,7 +1,7 @@
 ---
 name: jellyfin-media-advisor
 description: Expert media recommendation strategies using Jellyfin library tools
-version: 1.0.0
+version: 2.0.0
 author: hermes
 license: MIT
 metadata:
@@ -18,17 +18,35 @@ Use the Jellyfin tools to help users explore, analyze, and get recommendations f
 
 ## Available Tools
 
-- `jellyfin_search` -- Search by title, genre, year, type with sorting
+### Search & Discovery
+- `jellyfin_search` -- Search by title, genre, year, type, studio, content rating, runtime range, and person with sorting
 - `jellyfin_library_stats` -- Library overview and genre breakdown
-- `jellyfin_get_details` -- Full metadata for a specific item
+- `jellyfin_get_details` -- Full metadata for a specific item (includes IMDB/TMDB/TVDB IDs)
 - `jellyfin_similar` -- Find similar items (Jellyfin's similarity engine)
 - `jellyfin_recent` -- Recently added media
-- `jellyfin_all_movies` -- Complete movie list with IMDB IDs for cross-referencing
+- `jellyfin_all_movies` -- Complete movie list with IMDB/TMDB/TVDB IDs
+
+### Series Navigation
+- `jellyfin_get_seasons(series_id)` -- List all seasons for a TV series
+- `jellyfin_get_episodes(series_id, season_id?)` -- List episodes, optionally filtered by season
+- `jellyfin_next_up` -- Next-up queue for series with recent viewing activity
+
+### Collections
+- `jellyfin_list_collections` -- Browse all collections (BoxSets)
+- `jellyfin_collection_items(collection_id)` -- Items inside a specific collection
+
+### Library Structure
+- `jellyfin_list_views` -- Top-level library views (Movies, TV Shows, etc.)
+- `jellyfin_browse_folder(parent_id)` -- Navigate into a specific library folder
+
+### Reference Lists
+- `jellyfin_genres` -- All genres in the library
+- `jellyfin_studios` -- All studios in the library
 
 ## Authentication
 
 Set one of the following in `~/.hermes/.env`:
-1. `JELLYFIN_API_KEY` -- preferred, use Jellyfin Dashboard → API Keys
+1. `JELLYFIN_API_KEY` -- preferred, use Jellyfin Dashboard -> API Keys
 2. `JELLYFIN_USER` + `JELLYFIN_PASSWORD` -- alternative, token is cached after first auth
 
 The `JELLYFIN_URL` defaults to `http://localhost:8096`. Set `JELLYFIN_USER_ID` to skip auto-detection.
@@ -69,10 +87,51 @@ When the user asks for a recommendation by mood or criteria:
 
 When the user mentions an actor or director:
 
-1. Search for one known film by that person.
-2. Get details to confirm the person is in the cast/crew.
-3. The Jellyfin search API doesn't filter by person directly, so search broadly and use `jellyfin_get_details` on promising results to check cast lists.
-4. Alternatively, use `jellyfin_similar` on a known film by that person.
+1. Use `jellyfin_search` with the `person` parameter to find all media featuring that person.
+2. Get details on promising results with `jellyfin_get_details`.
+3. Alternatively, use `jellyfin_similar` on a known film by that person.
+
+## Strategy: TV Series Exploration
+
+When the user asks about a TV show:
+
+1. Search for the series with `jellyfin_search` (use `media_type="Series"`).
+2. Use `jellyfin_get_seasons(series_id)` to show all seasons.
+3. Use `jellyfin_get_episodes(series_id, season_id)` to drill into a specific season.
+4. For each episode, show title, episode number, overview, and runtime.
+
+## Strategy: Collection Exploration
+
+When the user wants to browse collections:
+
+1. Call `jellyfin_list_collections` to see all collections with item counts.
+2. For any interesting collection, call `jellyfin_collection_items(collection_id)` to see what is inside.
+3. Present the collection contents with brief descriptions.
+
+## Strategy: Library Structure Navigation
+
+When the user wants to explore the library structure:
+
+1. Call `jellyfin_list_views` to see top-level sections (Movies, TV Shows, etc.).
+2. Use `jellyfin_browse_folder(view_id)` to navigate into a section.
+3. Further drill down with `jellyfin_browse_folder` on sub-folders.
+4. Combine with `media_type` filter for focused browsing.
+
+## Strategy: Studio-Based Discovery
+
+When the user asks about a specific studio or wants to explore by studio:
+
+1. Call `jellyfin_studios` to see all studios represented in the library.
+2. Use `jellyfin_search` with the `studio` parameter to find all media from a specific studio.
+3. Present results sorted by rating or year.
+
+## Strategy: Runtime-Constrained Recommendations
+
+When the user has limited time ("I only have 90 minutes"):
+
+1. Use `jellyfin_search` with `max_runtime_minutes` to filter for movies that fit.
+2. Sort by CommunityRating Descending for best options within the time constraint.
+3. Present options with exact runtimes.
 
 ## Response Format
 
@@ -85,3 +144,8 @@ When presenting movie recommendations, use this format:
 When presenting library stats, highlight interesting facts:
 - Total items, genre distribution, decade distribution
 - Most represented genres, gaps in the collection
+
+When presenting TV series episodes, use this format:
+
+- S01E01 - "Episode Title" (Runtime min)
+  > Brief overview summary

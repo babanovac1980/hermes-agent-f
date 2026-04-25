@@ -1,6 +1,6 @@
 name: jellyfin
-version: 1.0.0
-description: "Jellyfin media server integration — search, stats, recommendations, and IMDB cross-referencing for a personal library."
+version: 2.0.0
+description: "Jellyfin media server integration — search, stats, recommendations, series navigation, collections, library browsing, and IMDB/TMDB/TVDB cross-referencing for a personal library."
 author: babanovac1980
 provides_tools:
   - jellyfin_search
@@ -9,6 +9,15 @@ provides_tools:
   - jellyfin_similar
   - jellyfin_recent
   - jellyfin_all_movies
+  - jellyfin_get_seasons
+  - jellyfin_get_episodes
+  - jellyfin_next_up
+  - jellyfin_list_collections
+  - jellyfin_collection_items
+  - jellyfin_list_views
+  - jellyfin_browse_folder
+  - jellyfin_genres
+  - jellyfin_studios
 requires_env:
   - JELLYFIN_API_KEY
   # JELLYFIN_USER + JELLYFIN_PASSWORD is also supported (see jellyfin_client.py)
