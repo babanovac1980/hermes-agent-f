@@ -1027,6 +1027,42 @@ These entries must exist in the codebase after every upstream sync:
 - **`hermes update`** pulls from `origin` (this fork), NOT upstream. It detects the fork and warns but proceeds correctly.
 - **Container rebuild** (rare, only if needed): `docker compose build` from this fork's repo — all fork changes are included
 
+### CRITICAL: All `docker exec` commands must use `gosu hermes`
+
+The container's entrypoint creates a `hermes` user (UID 99, GID 100) and runs
+hermes as that user via `gosu`. **Every command executed inside the container
+must also use `gosu hermes`** to avoid creating root-owned files that the
+hermes user cannot read.
+
+```bash
+# CORRECT — runs as hermes user, files are writable by hermes
+ssh root@192.168.1.100 "docker exec hermes-agent gosu hermes hermes tools list"
+ssh root@192.168.1.100 "docker exec hermes-agent gosu hermes hermes tools enable jellyfin"
+
+# WRONG — runs as root, creates root-owned config files, breaks hermes user
+ssh root@192.168.1.100 "docker exec hermes-agent hermes tools enable jellyfin"
+```
+
+Git operations (fetch/reset) are fine as root since they write to `/opt/hermes`
+which is part of the image, not the data volume. But anything that touches
+`/opt/data` (config, .env, sessions, tools config) MUST use `gosu hermes`.
+
+If permissions get broken (root-owned files in `/opt/data`), fix with:
+```bash
+ssh root@192.168.1.100 "docker exec hermes-agent chown -R 99:100 /opt/data"
+```
+
+### TUI Build
+
+The Dockerfile does not build the TUI (`ui-tui/`). After a container rebuild or
+first setup, run once:
+```bash
+ssh root@192.168.1.100 "docker exec hermes-agent bash -c 'cd /opt/hermes/ui-tui && npm install && npm run build && mkdir -p node_modules/@hermes/ink/dist && cp -r packages/hermes-ink/dist/* node_modules/@hermes/ink/dist/'"
+```
+
+After a git-only update (no rebuild), the TUI build persists and does not need
+to be rerun unless `ui-tui/` files changed.
+
 ### Hot-Patch Workflow
 
 For quick fixes, push to fork's `main`, then update the container via git reset.
