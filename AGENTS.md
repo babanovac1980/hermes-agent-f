@@ -940,3 +940,97 @@ not the specific names.
 
 Reviewers should reject new change-detector tests; authors should convert
 them into invariants before re-requesting review.
+
+---
+
+## Syncing with Upstream (Fork Maintenance)
+
+This fork tracks `upstream` (https://github.com/NousResearch/hermes-agent). Sync
+periodically to pick up new features and fixes while preserving fork-specific
+plugins and customizations.
+
+### Sync Procedure
+
+```bash
+git fetch upstream
+git merge upstream/main --no-edit
+# Resolve conflicts (see below), then:
+git push origin main
+# Update running container:
+ssh root@192.168.1.100 "docker exec hermes-agent bash -c 'cd /opt/hermes && git fetch origin && git reset --hard origin/main'"
+```
+
+### Predictable Merge Conflicts
+
+Upstream and this fork both modify the same registration files. These conflicts
+**always** follow the same pattern: upstream adds their toolsets/env vars, fork
+has jellyfin + home_memory entries. **Always keep BOTH sides** — do not let
+either side's additions get dropped.
+
+**Conflict files and resolution rules:**
+
+| File | What conflicts | Resolution |
+|------|---------------|------------|
+| `toolsets.py` | `_HERMES_CORE_TOOLS` list, `TOOLSETS` dict | Keep fork's jellyfin + home_memory entries AND upstream's new entries |
+| `hermes_cli/config.py` | `OPTIONAL_ENV_VARS` dict (jellyfin keys) | Keep fork's jellyfin env vars (expanded tool lists) AND upstream's new env vars |
+| `hermes_cli/tools_config.py` | `CONFIGURABLE_TOOLSETS` list, `_DEFAULT_OFF_TOOLSETS` set, platform restrictions | Keep fork's jellyfin + home_memory entries AND upstream's new entries + platform restriction helpers |
+| `hermes_cli/plugins.py` | Bundled plugins scanning block | Keep fork's bundled plugins scan (section "3. Bundled plugins") |
+| `run_agent.py` | Fork's `_sanitize_tools_for_provider` method | Keep fork's method AND upstream's new methods (both are additive) |
+| `AGENTS.md` | Fork plugin docs vs upstream additions | Keep both sections |
+
+**Key invariant:** After every merge, verify with:
+```bash
+hermes tools list | grep -E 'jellyfin|home_memory'
+```
+Both must show as registered toolsets.
+
+### Fork-Specific Entries to Preserve
+
+These entries must exist in the codebase after every upstream sync:
+
+**`toolsets.py` — `_HERMES_CORE_TOOLS`:**
+- 15 jellyfin tool names (`jellyfin_search` through `jellyfin_studios`)
+- 23 home_memory tool names (`get_structure_overview` through `delete_status`)
+
+**`toolsets.py` — `TOOLSETS` dict:**
+- `"jellyfin"` key with 15 tools
+- `"home_memory"` key with 23 tools
+
+**`hermes_cli/tools_config.py` — `CONFIGURABLE_TOOLSETS`:**
+- `("jellyfin", "🎬 Jellyfin", ...)`
+- `("home_memory", "🏠 Home Memory", ...)`
+
+**`hermes_cli/tools_config.py` — `_DEFAULT_OFF_TOOLSETS`:**
+- Must include `"jellyfin"` and `"home_memory"`
+
+**`hermes_cli/config.py` — `OPTIONAL_ENV_VARS`:**
+- `JELLYFIN_URL`, `JELLYFIN_API_KEY`, `JELLYFIN_USER`, `JELLYFIN_PASSWORD`, `JELLYFIN_USER_ID`
+- Each must list all 15 jellyfin tools in their `"tools"` array
+
+**`hermes_cli/plugins.py`:**
+- Bundled plugins scanning block (step 3 in `discover_manifests()`)
+
+**`run_agent.py`:**
+- `_sanitize_tools_for_provider()` method on AIAgent class
+
+**`AGENTS.md`:**
+- Fork Additions section (plugin system docs, jellyfin docs, home_memory docs)
+
+### Deployment (unRAID)
+
+- **Host:** `root@192.168.1.100`
+- **Container:** `hermes-agent`
+- **Source:** This fork (`babanovac1980/hermes-agent-f`), `main` branch
+- **Update method:** `git fetch origin && git reset --hard origin/main` inside the container (fast, no rebuild)
+- **After git update:** Run `pip install -e /opt/hermes --break-system-packages --quiet` if Python dependencies changed
+- **Config/data volume:** `/opt/data` (mounted from unRAID)
+- **`hermes update`** pulls from `origin` (this fork), NOT upstream. It detects the fork and warns but proceeds correctly.
+- **Container rebuild** (rare, only if needed): `docker compose build` from this fork's repo — all fork changes are included
+
+### Hot-Patch Workflow
+
+For quick fixes, push to fork's `main`, then update the container via git reset.
+Avoid leaving stashed changes in the container — they conflict on next update.
+If `hermes update` reports stash conflicts from old hot-patches that are now
+in the fork, drop the stash (`git stash drop`) since the fork already has
+those changes.
